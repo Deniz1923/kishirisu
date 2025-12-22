@@ -85,6 +85,12 @@ Examples:
         help="Stereo baseline in mm (default: 60)"
     )
     parser.add_argument(
+        "--scale",
+        type=float,
+        default=0.5,
+        help="Display scale factor (default: 0.5 to fit screen)"
+    )
+    parser.add_argument(
         "--depth", "-d",
         type=float,
         default=1000.0,
@@ -105,8 +111,8 @@ Examples:
     parser.add_argument(
         "--resolution", "-r",
         type=str,
-        default=None,
-        help="Preferred resolution WxH, e.g. '1920x1080' or '1280x720'"
+        default="640x480",
+        help="Preferred resolution WxH (default: 640x480 for performance)"
     )
     parser.add_argument(
         "--no-detector",
@@ -199,7 +205,8 @@ def create_display_frame(
     right: np.ndarray,
     depth_colored: np.ndarray,
     info_panel: np.ndarray,
-    show_depth_overlay: bool = True
+    show_depth_overlay: bool = True,
+    scale: float = 1.0
 ) -> np.ndarray:
     """
     Combine all visualization elements into a single display frame.
@@ -254,6 +261,12 @@ def create_display_frame(
     
     # Combine top and bottom
     display = np.vstack([top_row, bottom_row])
+    
+    # Scale down for display if needed
+    if scale != 1.0:
+        new_w = int(display.shape[1] * scale)
+        new_h = int(display.shape[0] * scale)
+        display = cv2.resize(display, (new_w, new_h))
     
     return display
 
@@ -451,7 +464,8 @@ def main():
             # ---- Create combined display ----
             display = create_display_frame(
                 left, right, depth_colored, info_panel,
-                show_depth_overlay=show_depth_overlay
+                show_depth_overlay=show_depth_overlay,
+                scale=args.scale
             )
             
             # ---- Show the display ----
