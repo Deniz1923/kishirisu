@@ -1,0 +1,10 @@
+[project]
+name = "kishirisu"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "opencv-python>=4.8.0",
+    "numpy>=1.26.0",
+]
