@@ -144,10 +144,10 @@ class InfoPanel:
         stats: DepthStats | None,
         fast_mode: bool,
         process_ms: float,
-        detections: list[Detection],
+        detections: list[tuple[Detection, float, tuple[float, float, float]]],
     ) -> npt.NDArray:
         """Create info panel image."""
-        height = 180 + min(len(detections), 3) * 25
+        height = 200 + min(len(detections), 5) * 40
         panel = np.full((height, width, 3), InfoPanel.BG_COLOR, dtype=np.uint8)
 
         y = 25
@@ -189,15 +189,30 @@ class InfoPanel:
                     (10, y), InfoPanel.FONT, 0.5, InfoPanel.TEXT_COLOR, 1)
         y += 25
 
-        # Detections
+        # Detections with depth
         if detections:
-            cv2.putText(panel, f"Detections: {len(detections)}",
-                        (10, y), InfoPanel.FONT, 0.5, (255, 200, 100), 1)
-            y += 20
-            for det in detections[:3]:
-                cv2.putText(panel, f"  {det.label}: ({det.x},{det.y})",
-                            (10, y), InfoPanel.FONT, 0.4, InfoPanel.TEXT_COLOR, 1)
-                y += 18
+            cv2.putText(panel, f"=== DETECTED OBJECTS ({len(detections)}) ===",
+                        (10, y), InfoPanel.FONT, 0.55, (255, 200, 100), 1)
+            y += 25
+            for det, depth_mm, pos_3d in detections[:5]:
+                # Object label and depth prominently
+                if depth_mm > 0:
+                    depth_cm = depth_mm / 10
+                    depth_m = depth_mm / 1000
+                    cv2.putText(panel, f"{det.label.upper()}: {depth_mm:.0f}mm = {depth_cm:.1f}cm = {depth_m:.2f}m",
+                                (10, y), InfoPanel.FONT, 0.5, (0, 255, 255), 1)
+                    y += 18
+                    # 3D position
+                    x3d, y3d, z3d = pos_3d
+                    cv2.putText(panel, f"  -> 3D: X={x3d:.0f} Y={y3d:.0f} Z={z3d:.0f}mm",
+                                (10, y), InfoPanel.FONT, 0.4, (150, 255, 150), 1)
+                else:
+                    cv2.putText(panel, f"{det.label.upper()}: NO DEPTH",
+                                (10, y), InfoPanel.FONT, 0.5, (100, 100, 100), 1)
+                y += 22
+        else:
+            cv2.putText(panel, "No objects detected",
+                        (10, y), InfoPanel.FONT, 0.5, (100, 100, 100), 1)
 
         return panel
 
@@ -381,12 +396,24 @@ class StereoVisionDemo:
 
         center_depth = result.at_center()
 
-        # Detect objects
-        detections: list[Detection] = []
+        # Detect objects and compute their depths
+        detections_with_depth: list[tuple[Detection, float, tuple[float, float, float]]] = []
         if self.detector:
-            detections = self.detector.detect(left)
-            for det in detections:
+            raw_detections = self.detector.detect(left)
+            for det in raw_detections:
+                # Get depth at detection center
+                depth_mm = self.depth_calc.get_depth_at(result.depth_map, det.x, det.y, window_size=11)
+                # Compute 3D position
+                pos_3d = self.depth_calc.pixel_to_3d(det.x, det.y, depth_mm)
+                detections_with_depth.append((det, depth_mm, pos_3d))
+
+                # Draw on left frame with depth info
                 det.draw_on(left)
+                if depth_mm > 0:
+                    # Draw depth label on detection
+                    depth_text = f"{depth_mm:.0f}mm ({depth_mm/10:.1f}cm)"
+                    cv2.putText(left, depth_text, (det.x - 50, det.y + det.height // 2 + 20),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
 
         # Visualize depth
         depth_vis = self.depth_calc.visualize(
@@ -400,9 +427,16 @@ class StereoVisionDemo:
             cv2.putText(depth_vis, f"{center_depth:.0f}mm", (cx + 15, cy - 10),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
 
+        # Draw detection depths on depth visualization too
+        for det, depth_mm, pos_3d in detections_with_depth:
+            if depth_mm > 0:
+                cv2.drawMarker(depth_vis, (det.x, det.y), (0, 255, 0), cv2.MARKER_CROSS, 15, 2)
+                cv2.putText(depth_vis, f"{depth_mm:.0f}mm", (det.x + 10, det.y - 5),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+
         # Create display
         display = self._compose_display(
-            left, right, depth_vis, result.stats, center_depth, detections
+            left, right, depth_vis, result.stats, center_depth, detections_with_depth
         )
 
         # Help overlay
@@ -412,11 +446,23 @@ class StereoVisionDemo:
 
         cv2.imshow("Stereo Vision Demo", display)
 
-        # Periodic terminal output
+        # Periodic terminal output with detection depths
         if time.time() - self.last_print_time >= 0.5:
             self.last_print_time = time.time()
-            if center_depth > 0:
-                print(f"[DEPTH] Center: {center_depth:.0f}mm | FPS: {self.fps:.1f}")
+            print("\n" + "=" * 70)
+            print(f"[CENTER DEPTH] {center_depth:.0f}mm = {center_depth/10:.1f}cm = {center_depth/1000:.2f}m" if center_depth > 0 else "[CENTER DEPTH] No valid depth")
+            print(f"[PERFORMANCE] FPS: {self.fps:.1f} | Processing: {self.process_ms:.1f}ms")
+            if detections_with_depth:
+                print(f"[DETECTIONS] Found {len(detections_with_depth)} object(s):")
+                for i, (det, depth_mm, pos_3d) in enumerate(detections_with_depth[:5], 1):
+                    if depth_mm > 0:
+                        x3d, y3d, z3d = pos_3d
+                        print(f"  {i}. {det.label.upper()} at pixel ({det.x}, {det.y})")
+                        print(f"     DEPTH: {depth_mm:.0f}mm = {depth_mm/10:.1f}cm = {depth_mm/1000:.2f}m")
+                        print(f"     3D POSITION: X={x3d:.0f}mm, Y={y3d:.0f}mm, Z={z3d:.0f}mm")
+                    else:
+                        print(f"  {i}. {det.label.upper()} at pixel ({det.x}, {det.y}) - NO VALID DEPTH")
+            print("=" * 70)
 
     def _compose_display(
         self,
@@ -425,7 +471,7 @@ class StereoVisionDemo:
         depth: npt.NDArray,
         stats: DepthStats,
         center_depth: float,
-        detections: list[Detection],
+        detections: list[tuple[Detection, float, tuple[float, float, float]]],
     ) -> npt.NDArray:
         """Compose the display layout."""
         if not self.camera:
