@@ -1,44 +1,91 @@
 """
-Stereo Vision Module for Ball Catcher Robot
-============================================
+Kishirisu Stereo Vision
+=======================
 
-This package provides depth calculation from stereo cameras with support for:
-- Mock camera using single webcam (for development/testing)
-- Real stereo camera support (for deployment)
-- Modular object detection interface (for YOLO integration)
+High-performance stereo depth estimation for robotics.
 
-Architecture:
-    StereoCapture (abstract) → MockStereoCamera / RealStereoCamera
-    DepthCalculator          → Computes depth from stereo pairs
-    ObjectDetector (abstract) → YOLODetector (to be implemented by friend)
+Quick Start::
 
-Usage:
-    from stereo_vision import MockStereoCamera, DepthCalculator, StereoConfig
-    
-    config = StereoConfig()
-    camera = MockStereoCamera(config)
-    depth_calc = DepthCalculator(config)
-    
-    left, right = camera.capture()
-    depth_map = depth_calc.compute(left, right)
-    depth_at_point = depth_calc.get_depth_at(depth_map, x=320, y=240)
+    from stereo_vision import StereoConfig, MockStereoCamera, DepthCalculator
+
+    config = StereoConfig.from_camera()
+    with MockStereoCamera(config) as camera:
+        left, right = camera.capture()
+        result = DepthCalculator(config).compute(left, right)
+        print(f"Center depth: {result.at_center():.0f}mm")
+
+Modules:
+    config: Camera configuration and SGBM parameters
+    capture: Abstract capture interface
+    mock_camera: Single-webcam mock stereo
+    depth: SGBM depth calculation
+    detection: Object detection interface
 """
 
-from .config import StereoConfig, detect_camera_capabilities
-from .capture import StereoCapture
-from .mock_camera import MockStereoCamera
-from .depth import DepthCalculator
-from .detection import Detection, ObjectDetector, DummyDetector
+__version__ = "1.0.0"
+
+# Configuration
+from .config import (
+    Resolution,
+    QualityPreset,
+    SGBMParams,
+    StereoConfig,
+    detect_camera_capabilities,
+)
+
+# Capture
+from .capture import (
+    CameraPosition,
+    StereoCapture,
+    BaseStereoCamera,
+)
+
+# Mock Camera
+from .mock_camera import (
+    MockStereoCamera,
+    NoiseMode,
+)
+
+# Depth
+from .depth import (
+    DepthStats,
+    DepthResult,
+    DepthCalculator,
+)
+
+# Detection
+from .detection import (
+    BoundingBox,
+    Detection,
+    Detector,
+    ObjectDetector,
+    DummyDetector,
+)
 
 __all__ = [
+    # Version
+    "__version__",
+    # Config
+    "Resolution",
+    "QualityPreset",
+    "SGBMParams",
     "StereoConfig",
     "detect_camera_capabilities",
-    "StereoCapture", 
+    # Capture
+    "CameraPosition",
+    "StereoCapture",
+    "BaseStereoCamera",
+    # Mock Camera
     "MockStereoCamera",
+    "NoiseMode",
+    # Depth
+    "DepthStats",
+    "DepthResult",
     "DepthCalculator",
+    # Detection
+    "BoundingBox",
     "Detection",
+    "Detector",
     "ObjectDetector",
     "DummyDetector",
 ]
-
-__version__ = "0.1.0"

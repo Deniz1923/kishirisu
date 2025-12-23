@@ -2,345 +2,378 @@
 Stereo Camera Configuration
 ============================
 
-This module contains configuration dataclasses for the stereo camera system.
+Immutable configuration dataclasses for stereo camera systems.
 All measurements are in millimeters (mm) unless otherwise specified.
 
-The configuration includes:
-- Camera intrinsic parameters (focal length, principal point)
-- Stereo baseline (distance between cameras)
-- Camera resolution (can be auto-detected)
-- X/Y axis movement ranges for the movable camera mount
+This module provides:
+- Resolution: Type-safe resolution representation
+- QualityPreset: Predefined quality/speed tradeoffs
+- SGBMParams: Stereo matching algorithm parameters
+- StereoConfig: Main configuration with validation and factory methods
 """
 
+from __future__ import annotations
+
+import json
 from dataclasses import dataclass, field
-from typing import Tuple, Optional
+from enum import Enum, auto
+from functools import cached_property
+from typing import TYPE_CHECKING, NamedTuple, Self
+
 import cv2
+import numpy as np
+
+if TYPE_CHECKING:
+    import numpy.typing as npt
+
+
+class Resolution(NamedTuple):
+    """Type-safe resolution representation."""
+
+    width: int
+    height: int
+
+    @property
+    def aspect_ratio(self) -> float:
+        """Width / height ratio."""
+        return self.width / self.height
+
+    def scaled(self, factor: float) -> Resolution:
+        """Return a new Resolution scaled by factor."""
+        return Resolution(int(self.width * factor), int(self.height * factor))
+
+    def __str__(self) -> str:
+        return f"{self.width}x{self.height}"
+
+    @classmethod
+    def parse(cls, s: str) -> Resolution:
+        """Parse 'WxH' string to Resolution."""
+        w, h = s.lower().split("x")
+        return cls(int(w), int(h))
+
+
+class QualityPreset(Enum):
+    """Predefined quality/performance tradeoffs."""
+
+    FAST = auto()  # Low latency, lower accuracy
+    BALANCED = auto()  # Good tradeoff for most use cases
+    QUALITY = auto()  # Best accuracy, higher latency
+
+
+class SGBMParams(NamedTuple):
+    """Semi-Global Block Matching algorithm parameters.
+
+    These control the quality and speed of stereo depth computation.
+    Use presets via SGBMParams.for_preset() for common configurations.
+    """
+
+    min_disparity: int = 0
+    num_disparities: int = 64  # Must be divisible by 16
+    block_size: int = 11  # Must be odd, >= 5
+    p1: int | None = None  # Auto-calculate if None
+    p2: int | None = None  # Auto-calculate if None
+    disp12_max_diff: int = 1
+    pre_filter_cap: int = 63
+    uniqueness_ratio: int = 10
+    speckle_window_size: int = 100
+    speckle_range: int = 32
+    mode: int = cv2.STEREO_SGBM_MODE_SGBM_3WAY
+
+    @classmethod
+    def for_preset(cls, preset: QualityPreset) -> SGBMParams:
+        """Get SGBM parameters optimized for a quality preset."""
+        match preset:
+            case QualityPreset.FAST:
+                return cls(
+                    num_disparities=48,
+                    block_size=5,
+                    uniqueness_ratio=5,
+                    speckle_window_size=50,
+                    mode=cv2.STEREO_SGBM_MODE_SGBM,
+                )
+            case QualityPreset.QUALITY:
+                return cls(
+                    num_disparities=128,
+                    block_size=11,
+                    uniqueness_ratio=15,
+                    speckle_window_size=200,
+                    speckle_range=16,
+                    mode=cv2.STEREO_SGBM_MODE_HH4,
+                )
+            case _:  # BALANCED
+                return cls()  # Defaults are balanced
+
+    def get_p1(self) -> int:
+        """Get P1 penalty, auto-calculating if not set."""
+        if self.p1 is not None:
+            return self.p1
+        return 8 * 3 * self.block_size**2
+
+    def get_p2(self) -> int:
+        """Get P2 penalty, auto-calculating if not set."""
+        if self.p2 is not None:
+            return self.p2
+        return 32 * 3 * self.block_size**2
 
 
 def detect_camera_capabilities(camera_index: int = 0) -> dict:
     """
     Detect camera resolution and FPS capabilities.
-    
+
     Opens the camera briefly to query its actual capabilities.
-    This is useful for auto-configuring the stereo system.
-    
+    Useful for auto-configuring the stereo system.
+
     Args:
         camera_index: OpenCV camera index (0 = default webcam)
-        
+
     Returns:
         Dictionary with detected capabilities:
-        {
-            'resolution': (width, height),
-            'fps': frames_per_second,
-            'backend': camera backend name,
-            'name': camera name if available
-        }
-        
+        - resolution: Resolution namedtuple
+        - fps: Frames per second
+        - backend: Camera backend name
+
     Raises:
         RuntimeError: If camera cannot be opened
-        
-    Example:
-        >>> caps = detect_camera_capabilities(0)
-        >>> print(f"Camera: {caps['resolution'][0]}x{caps['resolution'][1]} @ {caps['fps']} FPS")
-        Camera: 1920x1080 @ 30.0 FPS
     """
-    # Open camera connection
     cap = cv2.VideoCapture(camera_index)
-    
+
     if not cap.isOpened():
         raise RuntimeError(
-            f"Failed to open camera at index {camera_index}. "
-            "Make sure your webcam is connected and not in use."
+            f"Failed to open camera {camera_index}. "
+            "Ensure webcam is connected and not in use."
         )
-    
+
     try:
-        # Try to set maximum resolution (camera will use highest it supports)
-        # Common HD resolutions to try
-        resolutions_to_try = [
-            (1920, 1080),  # Full HD
-            (1280, 720),   # HD
-            (640, 480),    # VGA
-        ]
-        
-        best_resolution = (640, 480)
-        
-        for width, height in resolutions_to_try:
+        # Try common resolutions, highest first
+        for width, height in [(1920, 1080), (1280, 720), (640, 480)]:
             cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
-            
-            # Check what we actually got
+
             actual_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
             actual_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-            
-            if actual_w >= best_resolution[0]:
-                best_resolution = (actual_w, actual_h)
+
+            if actual_w >= width:
                 break
-        
-        # Get FPS
+
         fps = cap.get(cv2.CAP_PROP_FPS)
         if fps <= 0:
-            fps = 30.0  # Default assumption
-        
-        # Get backend info
-        backend_id = int(cap.get(cv2.CAP_PROP_BACKEND))
-        backend_name = "Unknown"
+            fps = 30.0
+
         try:
-            backend_name = cap.getBackendName()
-        except:
-            pass
-        
+            backend = cap.getBackendName()
+        except Exception:
+            backend = "Unknown"
+
         return {
-            'resolution': best_resolution,
-            'fps': fps,
-            'backend': backend_name,
-            'camera_index': camera_index,
+            "resolution": Resolution(actual_w, actual_h),
+            "fps": fps,
+            "backend": backend,
+            "camera_index": camera_index,
         }
-        
+
     finally:
         cap.release()
 
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class StereoConfig:
     """
-    Configuration for stereo camera system.
-    
-    This class holds all parameters needed for stereo depth calculation.
-    Set resolution to None for auto-detection from camera hardware.
-    
+    Immutable configuration for stereo vision system.
+
+    Use factory methods for convenient construction:
+    - StereoConfig.from_camera() - Auto-detect from hardware
+    - StereoConfig.for_preset() - Use quality preset
+
     Attributes:
-        resolution: (width, height) in pixels, or None for auto-detect
-        fps: Target FPS, or None for auto-detect
-        focal_length_px: Camera focal length in pixels. Set to None to estimate
-                        from resolution (assumes ~70° horizontal FOV typical webcam)
-        principal_point: (cx, cy) optical center, None to auto-calculate as image center
-        baseline_mm: Distance between left and right cameras in millimeters
-        x_axis_range: (min, max) movement range on X-axis in mm
-        y_axis_range: (min, max) movement range on Y-axis in mm
+        resolution: Image dimensions (width, height)
+        fps: Target frames per second
+        focal_length_px: Camera focal length in pixels (auto-estimated if None)
+        principal_point: Optical center (cx, cy), defaults to image center
+        baseline_mm: Distance between stereo cameras in millimeters
         min_depth_mm: Minimum reliable depth measurement
         max_depth_mm: Maximum reliable depth measurement
-        
+        sgbm: SGBM algorithm parameters
+
     Example:
-        >>> # Auto-detect from camera
-        >>> config = StereoConfig.from_camera(camera_index=0)
-        >>> print(f"Detected: {config.resolution} @ {config.fps} FPS")
-        
-        >>> # Manual configuration
-        >>> config = StereoConfig(resolution=(1920, 1080), fps=60)
+        >>> config = StereoConfig.from_camera(baseline_mm=65.0)
+        >>> print(f"Using {config.resolution} @ {config.fps}fps")
     """
-    
-    # ----- Camera Resolution -----
-    # Width and height of camera frames in pixels
-    # Set to None for auto-detection
-    resolution: Tuple[int, int] = (640, 480)
-    
-    # ----- Frame Rate -----
-    # Target frames per second, None for auto-detect
+
+    resolution: Resolution = field(default_factory=lambda: Resolution(640, 480))
     fps: float = 30.0
-    
-    # ----- Camera Intrinsics -----
-    # Focal length in pixels
-    # Set to None to auto-estimate based on resolution (assumes ~70° HFOV)
-    # Formula: focal_length_px = width / (2 * tan(HFOV/2))
-    # For 70° HFOV: focal_length_px ≈ width * 0.82
-    focal_length_px: Optional[float] = None
-    
-    # Principal point (optical center), typically at image center
-    # Set to None to auto-calculate as (width/2, height/2)
-    principal_point: Optional[Tuple[float, float]] = None
-    
-    # ----- Stereo Configuration -----
-    # Distance between left and right camera centers in millimeters
-    # Larger baseline = better depth precision at long range, worse at close range
-    baseline_mm: float = 60.0  # Typical webcam stereo baseline
-    
-    # ----- Axis Movement Ranges -----
-    # The cameras on your robot can move on X (horizontal) and Y (vertical) axes
-    # These define the movement limits in millimeters from center position
-    x_axis_range: Tuple[float, float] = (-50.0, 50.0)  # Left/Right movement
-    y_axis_range: Tuple[float, float] = (-30.0, 30.0)  # Up/Down movement
-    
-    # ----- Depth Range -----
-    # Valid depth measurement range in millimeters
-    # Objects closer than min or farther than max will have unreliable depth
-    min_depth_mm: float = 200.0    # 20cm minimum
-    max_depth_mm: float = 5000.0   # 5m maximum
-    
-    # ----- Stereo Matching Parameters -----
-    # These affect the quality and speed of depth computation
-    num_disparities: int = 64      # Must be divisible by 16, higher = larger depth range
-    block_size: int = 11           # Odd number, larger = smoother but less detail
-    
-    # ----- Auto-detection metadata (populated after from_camera()) -----
-    _detected_fps: Optional[float] = field(default=None, repr=False)
-    _camera_backend: Optional[str] = field(default=None, repr=False)
-    
-    def __post_init__(self):
-        """
-        Post-initialization validation and auto-calculation of derived values.
-        """
+    focal_length_px: float | None = None
+    principal_point: tuple[float, float] | None = None
+    baseline_mm: float = 60.0
+    min_depth_mm: float = 200.0
+    max_depth_mm: float = 5000.0
+    sgbm: SGBMParams = field(default_factory=SGBMParams)
+
+    # Private computed values (calculated in __post_init__)
+    _focal: float = field(init=False, repr=False, compare=False)
+    _cx: float = field(init=False, repr=False, compare=False)
+    _cy: float = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        """Validate configuration and compute derived values."""
         # Validate resolution
-        assert self.resolution is not None, \
-            "Resolution must be set (use from_camera() for auto-detection)"
-        assert self.resolution[0] > 0 and self.resolution[1] > 0, \
-            "Resolution must be positive"
-        
-        # Auto-estimate focal length if not provided
-        # Assumes typical webcam with ~70° horizontal field of view
-        # focal_length = width / (2 * tan(35°)) ≈ width * 0.82
-        if self.focal_length_px is None:
-            self.focal_length_px = self.resolution[0] * 0.82
-        
-        # Auto-calculate principal point if not provided
-        if self.principal_point is None:
-            self.principal_point = (
-                self.resolution[0] / 2.0,
-                self.resolution[1] / 2.0
-            )
-        
-        # Validate other parameters
-        assert self.focal_length_px > 0, \
-            "Focal length must be positive"
-        assert self.baseline_mm > 0, \
-            "Baseline must be positive"
-        assert self.num_disparities % 16 == 0, \
-            "num_disparities must be divisible by 16"
-        assert self.block_size % 2 == 1 and self.block_size >= 5, \
-            "block_size must be odd and >= 5"
-    
+        if self.resolution.width <= 0 or self.resolution.height <= 0:
+            raise ValueError(f"Invalid resolution: {self.resolution}")
+
+        # Validate baseline
+        if self.baseline_mm <= 0:
+            raise ValueError(f"Baseline must be positive: {self.baseline_mm}")
+
+        # Validate SGBM params
+        if self.sgbm.num_disparities % 16 != 0:
+            raise ValueError("num_disparities must be divisible by 16")
+        if self.sgbm.block_size < 5 or self.sgbm.block_size % 2 == 0:
+            raise ValueError("block_size must be odd and >= 5")
+
+        # Compute focal length (estimate ~70° HFOV if not provided)
+        focal = (
+            self.focal_length_px
+            if self.focal_length_px is not None
+            else self.resolution.width * 0.82
+        )
+        object.__setattr__(self, "_focal", focal)
+
+        # Compute principal point
+        if self.principal_point is not None:
+            cx, cy = self.principal_point
+        else:
+            cx = self.resolution.width / 2.0
+            cy = self.resolution.height / 2.0
+        object.__setattr__(self, "_cx", cx)
+        object.__setattr__(self, "_cy", cy)
+
+    @property
+    def width(self) -> int:
+        """Image width in pixels."""
+        return self.resolution.width
+
+    @property
+    def height(self) -> int:
+        """Image height in pixels."""
+        return self.resolution.height
+
+    @property
+    def focal(self) -> float:
+        """Focal length in pixels (computed or explicit)."""
+        return self._focal
+
+    @property
+    def cx(self) -> float:
+        """Principal point X coordinate."""
+        return self._cx
+
+    @property
+    def cy(self) -> float:
+        """Principal point Y coordinate."""
+        return self._cy
+
+    @cached_property
+    def depth_factor(self) -> float:
+        """Pre-computed focal_length * baseline for depth calculation."""
+        return self._focal * self.baseline_mm
+
+    @cached_property
+    def camera_matrix(self) -> npt.NDArray[np.float64]:
+        """3x3 camera intrinsic matrix K."""
+        return np.array(
+            [
+                [self._focal, 0, self._cx],
+                [0, self._focal, self._cy],
+                [0, 0, 1],
+            ],
+            dtype=np.float64,
+        )
+
     @classmethod
     def from_camera(
         cls,
         camera_index: int = 0,
         baseline_mm: float = 60.0,
-        prefer_resolution: Optional[Tuple[int, int]] = None,
-        **kwargs
-    ) -> "StereoConfig":
+        prefer_resolution: Resolution | None = None,
+        preset: QualityPreset = QualityPreset.BALANCED,
+    ) -> Self:
         """
         Create configuration by auto-detecting camera capabilities.
-        
-        This is the recommended way to create a StereoConfig when you want
-        to use the camera's native resolution and FPS.
-        
+
         Args:
-            camera_index: OpenCV camera index (0 = default webcam)
-            baseline_mm: Stereo baseline in mm (still needs manual measurement)
-            prefer_resolution: If set, try to use this resolution instead of max
-            **kwargs: Additional StereoConfig parameters to override
-            
+            camera_index: OpenCV camera index
+            baseline_mm: Stereo baseline (must be measured manually)
+            prefer_resolution: Preferred resolution (uses detected if larger)
+            preset: Quality preset for SGBM parameters
+
         Returns:
-            StereoConfig with detected resolution and FPS
-            
-        Example:
-            >>> # Auto-detect everything
-            >>> config = StereoConfig.from_camera(camera_index=0)
-            >>> print(f"Using: {config.resolution} @ {config.fps} FPS")
-            
-            >>> # Auto-detect but prefer 720p
-            >>> config = StereoConfig.from_camera(prefer_resolution=(1280, 720))
+            StereoConfig with detected parameters
         """
-        print(f"[StereoConfig] Detecting camera {camera_index} capabilities...")
-        
         caps = detect_camera_capabilities(camera_index)
-        
-        resolution = caps['resolution']
-        fps = caps['fps']
-        
-        print(f"[StereoConfig] Detected: {resolution[0]}x{resolution[1]} @ {fps} FPS")
-        print(f"[StereoConfig] Backend: {caps['backend']}")
-        
-        # If preferred resolution requested, try to use it
+        resolution = caps["resolution"]
+
         if prefer_resolution is not None:
-            # Validate it's <= detected max
-            if (prefer_resolution[0] <= resolution[0] and 
-                prefer_resolution[1] <= resolution[1]):
+            if (
+                prefer_resolution.width <= resolution.width
+                and prefer_resolution.height <= resolution.height
+            ):
                 resolution = prefer_resolution
-                print(f"[StereoConfig] Using preferred: {resolution[0]}x{resolution[1]}")
-        
-        config = cls(
+
+        return cls(
             resolution=resolution,
-            fps=fps,
+            fps=caps["fps"],
             baseline_mm=baseline_mm,
-            _detected_fps=fps,
-            _camera_backend=caps['backend'],
-            **kwargs
+            sgbm=SGBMParams.for_preset(preset),
         )
-        
-        return config
-    
-    @property
-    def width(self) -> int:
-        """Get image width in pixels."""
-        return self.resolution[0]
-    
-    @property
-    def height(self) -> int:
-        """Get image height in pixels."""
-        return self.resolution[1]
-    
-    @property
-    def cx(self) -> float:
-        """Get principal point X coordinate."""
-        return self.principal_point[0]
-    
-    @property
-    def cy(self) -> float:
-        """Get principal point Y coordinate."""
-        return self.principal_point[1]
-    
-    @property
-    def aspect_ratio(self) -> float:
-        """Get aspect ratio (width / height)."""
-        return self.resolution[0] / self.resolution[1]
-    
-    def get_camera_matrix(self):
-        """
-        Get the 3x3 camera intrinsic matrix K.
-        
-        The camera matrix is:
-            K = [[fx,  0, cx],
-                 [ 0, fy, cy],
-                 [ 0,  0,  1]]
-        
-        Where fx=fy=focal_length_px (assuming square pixels)
-        
-        Returns:
-            numpy.ndarray: 3x3 camera intrinsic matrix
-        """
-        import numpy as np
-        return np.array([
-            [self.focal_length_px, 0, self.cx],
-            [0, self.focal_length_px, self.cy],
-            [0, 0, 1]
-        ], dtype=np.float64)
-    
-    def scale_to_resolution(self, new_resolution: Tuple[int, int]) -> "StereoConfig":
+
+    @classmethod
+    def for_preset(
+        cls,
+        preset: QualityPreset,
+        resolution: Resolution = Resolution(640, 480),
+        baseline_mm: float = 60.0,
+    ) -> Self:
+        """Create configuration with optimized parameters for a preset."""
+        return cls(
+            resolution=resolution,
+            baseline_mm=baseline_mm,
+            sgbm=SGBMParams.for_preset(preset),
+        )
+
+    def scaled(self, factor: float) -> StereoConfig:
         """
         Create a new config scaled to a different resolution.
-        
+
         Useful for processing at lower resolution for speed,
         then mapping results back to full resolution.
-        
-        Args:
-            new_resolution: Target (width, height)
-            
-        Returns:
-            New StereoConfig scaled appropriately
         """
-        scale_x = new_resolution[0] / self.resolution[0]
-        scale_y = new_resolution[1] / self.resolution[1]
-        scale = (scale_x + scale_y) / 2  # Average scale
-        
+        new_res = self.resolution.scaled(factor)
         return StereoConfig(
-            resolution=new_resolution,
+            resolution=new_res,
             fps=self.fps,
-            focal_length_px=self.focal_length_px * scale,
-            principal_point=(self.cx * scale_x, self.cy * scale_y),
+            focal_length_px=self._focal * factor,
+            principal_point=(self._cx * factor, self._cy * factor),
             baseline_mm=self.baseline_mm,
-            x_axis_range=self.x_axis_range,
-            y_axis_range=self.y_axis_range,
             min_depth_mm=self.min_depth_mm,
             max_depth_mm=self.max_depth_mm,
-            num_disparities=self.num_disparities,
-            block_size=self.block_size,
+            sgbm=self.sgbm,
         )
+
+    def to_dict(self) -> dict:
+        """Serialize to dictionary (for JSON storage)."""
+        return {
+            "resolution": [self.resolution.width, self.resolution.height],
+            "fps": self.fps,
+            "focal_length_px": self._focal,
+            "principal_point": [self._cx, self._cy],
+            "baseline_mm": self.baseline_mm,
+            "min_depth_mm": self.min_depth_mm,
+            "max_depth_mm": self.max_depth_mm,
+            "sgbm": {
+                "num_disparities": self.sgbm.num_disparities,
+                "block_size": self.sgbm.block_size,
+            },
+        }
+
+    def to_json(self) -> str:
+        """Serialize to JSON string."""
+        return json.dumps(self.to_dict(), indent=2)

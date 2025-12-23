@@ -2,386 +2,267 @@
 Object Detection Interface
 ===========================
 
-This module defines the interface for object detection that your friend
-will implement with YOLO.
+Type-safe detection interface designed for YOLO integration.
 
-The design philosophy is:
-1. Define a clear, minimal interface (ObjectDetector abstract class)
-2. Define a standard Detection dataclass for results
-3. Provide a DummyDetector for testing until YOLO is ready
-
-Your friend should subclass ObjectDetector and implement the detect() method
-using their YOLO model. The rest of the pipeline (stereo capture, depth
-calculation) will work unchanged.
-
-Example YOLO implementation (for your friend):
----------------------------------------------
-    from stereo_vision import Detection, ObjectDetector
-    from ultralytics import YOLO
-    
-    class YOLODetector(ObjectDetector):
-        def __init__(self, model_path: str):
-            self.model = YOLO(model_path)
-        
-        def detect(self, frame: np.ndarray) -> list[Detection]:
-            results = self.model(frame)
-            detections = []
-            for r in results[0].boxes:
-                x, y, w, h = r.xywh[0].cpu().numpy()
-                detections.append(Detection(
-                    label=self.model.names[int(r.cls)],
-                    x=int(x), y=int(y),
-                    width=int(w), height=int(h),
-                    confidence=float(r.conf)
-                ))
-            return detections
+This module provides:
+- BoundingBox: Immutable bounding box with geometry utilities
+- Detection: Immutable detection result
+- Detector: Protocol for detection backends
+- DummyDetector: Color-based placeholder for testing
 """
 
-from abc import ABC, abstractmethod
+from __future__ import annotations
+
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import TYPE_CHECKING, Protocol, Sequence
+
 import cv2
 import numpy as np
 
+if TYPE_CHECKING:
+    import numpy.typing as npt
 
-@dataclass
-class Detection:
+
+@dataclass(frozen=True, slots=True)
+class BoundingBox:
     """
-    Represents a detected object in an image.
-    
-    This is the standard output format that all detectors must use.
-    This allows the depth calculation pipeline to work with any
-    detection backend (YOLO, SSD, manual annotation, etc.)
-    
+    Immutable bounding box with center + size representation.
+
     Attributes:
-        label: Class name of detected object (e.g., "ball", "person")
-        x: Center X coordinate of bounding box in pixels
-        y: Center Y coordinate of bounding box in pixels
-        width: Width of bounding box in pixels
-        height: Height of bounding box in pixels
-        confidence: Detection confidence score (0.0 to 1.0)
-        
-    Properties:
-        bbox: Returns (x1, y1, x2, y2) corner coordinates
-        area: Returns bounding box area in pixels
-        
-    Example:
-        >>> det = Detection(label="ball", x=320, y=240, width=50, height=50, confidence=0.95)
-        >>> print(f"Found {det.label} at ({det.x}, {det.y}) with {det.confidence:.0%} confidence")
-        Found ball at (320, 240) with 95% confidence
+        cx: Center X coordinate
+        cy: Center Y coordinate
+        w: Width
+        h: Height
     """
-    label: str
-    x: int           # Center X
-    y: int           # Center Y
-    width: int       # Bounding box width
-    height: int      # Bounding box height
-    confidence: float
-    
+
+    cx: int
+    cy: int
+    w: int
+    h: int
+
     @property
-    def bbox(self) -> Tuple[int, int, int, int]:
-        """
-        Get bounding box as (x1, y1, x2, y2) corner coordinates.
-        
-        Returns:
-            Tuple of (left, top, right, bottom) pixel coordinates
-        """
-        x1 = self.x - self.width // 2
-        y1 = self.y - self.height // 2
-        x2 = self.x + self.width // 2
-        y2 = self.y + self.height // 2
-        return (x1, y1, x2, y2)
-    
+    def corners(self) -> tuple[int, int, int, int]:
+        """Get (x1, y1, x2, y2) corner coordinates."""
+        return (
+            self.cx - self.w // 2,
+            self.cy - self.h // 2,
+            self.cx + self.w // 2,
+            self.cy + self.h // 2,
+        )
+
     @property
     def area(self) -> int:
-        """Get bounding box area in square pixels."""
-        return self.width * self.height
-    
+        """Bounding box area in pixels."""
+        return self.w * self.h
+
+    @classmethod
+    def from_corners(cls, x1: int, y1: int, x2: int, y2: int) -> BoundingBox:
+        """Create from corner coordinates."""
+        return cls(
+            cx=(x1 + x2) // 2,
+            cy=(y1 + y2) // 2,
+            w=x2 - x1,
+            h=y2 - y1,
+        )
+
+    def iou(self, other: BoundingBox) -> float:
+        """Compute Intersection over Union with another box."""
+        x1a, y1a, x2a, y2a = self.corners
+        x1b, y1b, x2b, y2b = other.corners
+
+        xi1 = max(x1a, x1b)
+        yi1 = max(y1a, y1b)
+        xi2 = min(x2a, x2b)
+        yi2 = min(y2a, y2b)
+
+        inter_w = max(0, xi2 - xi1)
+        inter_h = max(0, yi2 - yi1)
+        inter_area = inter_w * inter_h
+
+        union_area = self.area + other.area - inter_area
+        return inter_area / union_area if union_area > 0 else 0.0
+
+
+@dataclass(frozen=True, slots=True)
+class Detection:
+    """
+    Immutable detection result.
+
+    Attributes:
+        label: Class name (e.g., "ball", "person")
+        bbox: Bounding box
+        confidence: Detection confidence (0.0 to 1.0)
+        track_id: Optional tracking ID for multi-frame tracking
+    """
+
+    label: str
+    bbox: BoundingBox
+    confidence: float
+    track_id: int | None = None
+
+    # Convenience properties for backward compatibility
+    @property
+    def x(self) -> int:
+        """Center X coordinate."""
+        return self.bbox.cx
+
+    @property
+    def y(self) -> int:
+        """Center Y coordinate."""
+        return self.bbox.cy
+
+    @property
+    def width(self) -> int:
+        """Bounding box width."""
+        return self.bbox.w
+
+    @property
+    def height(self) -> int:
+        """Bounding box height."""
+        return self.bbox.h
+
     def draw_on(
         self,
-        frame: np.ndarray,
-        color: Tuple[int, int, int] = (0, 255, 0),
+        frame: npt.NDArray,
+        color: tuple[int, int, int] = (0, 255, 0),
         thickness: int = 2,
-        show_label: bool = True
-    ) -> np.ndarray:
+        show_label: bool = True,
+    ) -> npt.NDArray:
         """
-        Draw this detection on a frame.
-        
+        Draw detection on frame.
+
         Args:
-            frame: Image to draw on (will be modified in place)
-            color: BGR color for the bounding box
+            frame: Image to draw on (modified in place)
+            color: BGR color for bounding box
             thickness: Line thickness
-            show_label: Whether to show label and confidence
-            
+            show_label: Whether to show label text
+
         Returns:
-            The frame with detection drawn (same as input)
+            The frame (same object as input)
         """
-        x1, y1, x2, y2 = self.bbox
-        
-        # Draw bounding box
+        x1, y1, x2, y2 = self.bbox.corners
+
         cv2.rectangle(frame, (x1, y1), (x2, y2), color, thickness)
-        
-        # Draw label and confidence
+
         if show_label:
-            label_text = f"{self.label}: {self.confidence:.2f}"
-            font_scale = 0.5
+            text = f"{self.label}: {self.confidence:.2f}"
             font = cv2.FONT_HERSHEY_SIMPLEX
-            
-            # Get text size for background rectangle
-            (text_width, text_height), baseline = cv2.getTextSize(
-                label_text, font, font_scale, 1
-            )
-            
-            # Draw background rectangle for text
-            cv2.rectangle(
-                frame,
-                (x1, y1 - text_height - 10),
-                (x1 + text_width + 10, y1),
-                color,
-                -1  # Filled
-            )
-            
-            # Draw text
-            cv2.putText(
-                frame,
-                label_text,
-                (x1 + 5, y1 - 5),
-                font,
-                font_scale,
-                (0, 0, 0),  # Black text
-                1
-            )
-        
+
+            (tw, th), _ = cv2.getTextSize(text, font, 0.5, 1)
+
+            cv2.rectangle(frame, (x1, y1 - th - 10), (x1 + tw + 10, y1), color, -1)
+            cv2.putText(frame, text, (x1 + 5, y1 - 5), font, 0.5, (0, 0, 0), 1)
+
         return frame
 
 
-class ObjectDetector(ABC):
+class Detector(Protocol):
     """
-    Abstract base class for object detection.
-    
-    YOUR FRIEND should subclass this and implement detect() with YOLO.
-    
-    This abstraction allows the stereo vision pipeline to work with
-    any detection backend: YOLO, SSD, Faster R-CNN, or even manual
-    annotation for testing.
-    
-    The interface is intentionally minimal to allow flexibility in
-    implementation. The only required method is detect().
-    
-    Example Implementation:
-        >>> class YOLODetector(ObjectDetector):
-        ...     def __init__(self, model_path: str):
-        ...         self.model = load_yolo_model(model_path)
-        ...     
-        ...     def detect(self, frame: np.ndarray) -> List[Detection]:
-        ...         results = self.model.predict(frame)
-        ...         return [Detection(...) for r in results]
+    Protocol for object detection backends.
+
+    Implement this with YOLO, SSD, or any other detector.
     """
-    
-    @abstractmethod
-    def detect(self, frame: np.ndarray) -> List[Detection]:
+
+    def detect(self, frame: npt.NDArray) -> list[Detection]:
         """
-        Detect objects in a frame.
-        
-        This method must be implemented by all subclasses.
-        
+        Detect objects in a single frame.
+
         Args:
-            frame: Input image as numpy array (BGR format, HxWx3)
-                  This is the standard OpenCV image format.
-        
+            frame: BGR image (H, W, 3)
+
         Returns:
-            List of Detection objects found in the frame.
-            Return empty list if no objects detected.
-            
-        Note:
-            - Implementations should be as fast as possible for real-time use
-            - Consider running on GPU if available
-            - Filter by confidence threshold before returning
+            List of Detection objects
         """
-        pass
-    
-    def detect_in_roi(
-        self,
-        frame: np.ndarray,
-        roi: Tuple[int, int, int, int]
-    ) -> List[Detection]:
-        """
-        Detect objects only within a Region of Interest.
-        
-        This is a convenience method that crops the frame to the ROI,
-        runs detection, and adjusts coordinates back to full frame.
-        
-        Override this method if your detector has native ROI support
-        for better performance.
-        
-        Args:
-            frame: Full input image
-            roi: (x1, y1, x2, y2) region of interest
-            
-        Returns:
-            List of Detections with coordinates in full frame space
-        """
-        x1, y1, x2, y2 = roi
-        
-        # Crop to ROI
-        roi_frame = frame[y1:y2, x1:x2]
-        
-        # Detect in cropped region
-        detections = self.detect(roi_frame)
-        
-        # Adjust coordinates to full frame
-        adjusted = []
-        for det in detections:
-            adjusted.append(Detection(
-                label=det.label,
-                x=det.x + x1,
-                y=det.y + y1,
-                width=det.width,
-                height=det.height,
-                confidence=det.confidence
-            ))
-        
-        return adjusted
+        ...
 
 
-class DummyDetector(ObjectDetector):
+# Backward compatibility alias
+ObjectDetector = Detector
+
+
+class DummyDetector:
     """
     Simple color-based detector for testing.
-    
-    This is a PLACEHOLDER detector that finds colored objects using
-    HSV color filtering and contour detection. It's NOT meant for
-    production use - it's just for testing the pipeline until your
-    friend implements the YOLO detector.
-    
-    Default configuration detects orange/red objects (like typical balls).
-    Modify the HSV range for different colors.
-    
+
+    NOT for production - just a placeholder until YOLO is integrated.
+    Detects colored objects using HSV filtering and contour analysis.
+
     Example:
-        >>> # Create detector for orange balls
         >>> detector = DummyDetector(label="ball")
-        >>> 
-        >>> # Get detections
         >>> detections = detector.detect(frame)
-        >>> for det in detections:
-        ...     print(f"Found {det.label} at ({det.x}, {det.y})")
     """
-    
+
+    __slots__ = ("_label", "_hsv_lower", "_hsv_upper", "_min_area", "_max_count")
+
     def __init__(
         self,
         label: str = "ball",
-        hsv_lower: Tuple[int, int, int] = (0, 100, 100),
-        hsv_upper: Tuple[int, int, int] = (20, 255, 255),
+        hsv_lower: tuple[int, int, int] = (0, 100, 100),
+        hsv_upper: tuple[int, int, int] = (20, 255, 255),
         min_area: int = 500,
-        max_detections: int = 5
-    ):
+        max_detections: int = 5,
+    ) -> None:
         """
-        Initialize the dummy detector.
-        
+        Initialize color detector.
+
         Args:
-            label: Label to assign to detected objects
-            hsv_lower: Lower bound of HSV color range (H: 0-179, S: 0-255, V: 0-255)
-            hsv_upper: Upper bound of HSV color range
-            min_area: Minimum contour area to be considered a detection
-            max_detections: Maximum number of detections to return
-            
-        Common HSV ranges:
-            - Orange: lower=(0, 100, 100), upper=(20, 255, 255)
-            - Red: lower=(0, 100, 100), upper=(10, 255, 255) OR (170, 100, 100)-(180, 255, 255)
-            - Green: lower=(40, 100, 100), upper=(80, 255, 255)
-            - Blue: lower=(100, 100, 100), upper=(140, 255, 255)
-            - Yellow: lower=(20, 100, 100), upper=(40, 255, 255)
+            label: Label for detected objects
+            hsv_lower: Lower HSV bound (H: 0-179, S/V: 0-255)
+            hsv_upper: Upper HSV bound
+            min_area: Minimum contour area
+            max_detections: Maximum detections to return
         """
         self._label = label
         self._hsv_lower = np.array(hsv_lower)
         self._hsv_upper = np.array(hsv_upper)
         self._min_area = min_area
-        self._max_detections = max_detections
-    
-    def detect(self, frame: np.ndarray) -> List[Detection]:
-        """
-        Detect colored objects in the frame.
-        
-        The algorithm:
-        1. Convert frame to HSV color space
-        2. Create mask for target color range
-        3. Find contours in the mask
-        4. Filter by minimum area
-        5. Return bounding boxes as Detections
-        
-        Args:
-            frame: Input BGR image
-            
-        Returns:
-            List of Detection objects for found colored regions
-        """
-        # Step 1: Convert to HSV color space
-        # HSV (Hue, Saturation, Value) is better for color detection
-        # than RGB because it separates color from brightness
+        self._max_count = max_detections
+
+    def detect(self, frame: npt.NDArray) -> list[Detection]:
+        """Detect colored objects in frame."""
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-        
-        # Step 2: Create binary mask for the target color
-        # Pixels within the HSV range become white (255), others black (0)
         mask = cv2.inRange(hsv, self._hsv_lower, self._hsv_upper)
-        
-        # Step 3: Clean up the mask with morphological operations
-        # This removes noise (small white/black dots)
+
+        # Morphological cleanup
         kernel = np.ones((5, 5), np.uint8)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)   # Remove noise
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)  # Fill holes
-        
-        # Step 4: Find contours (outlines of white regions)
-        contours, _ = cv2.findContours(
-            mask,
-            cv2.RETR_EXTERNAL,       # Only outer contours
-            cv2.CHAIN_APPROX_SIMPLE  # Compress to key points
-        )
-        
-        # Step 5: Convert contours to Detections
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
         detections = []
         for contour in contours:
             area = cv2.contourArea(contour)
-            
-            # Skip small contours (noise)
             if area < self._min_area:
                 continue
-            
-            # Get bounding box
+
             x, y, w, h = cv2.boundingRect(contour)
-            
-            # Calculate center
-            center_x = x + w // 2
-            center_y = y + h // 2
-            
-            # Create Detection
-            # Confidence based on how circular the contour is
-            # (balls should be roughly circular)
+
+            # Circularity as confidence proxy
             perimeter = cv2.arcLength(contour, True)
             circularity = 4 * np.pi * area / (perimeter * perimeter + 1e-6)
-            confidence = min(1.0, circularity)  # Clamp to max 1.0
-            
-            detections.append(Detection(
-                label=self._label,
-                x=center_x,
-                y=center_y,
-                width=w,
-                height=h,
-                confidence=confidence
-            ))
-        
-        # Sort by area (largest first) and limit count
-        detections.sort(key=lambda d: d.area, reverse=True)
-        return detections[:self._max_detections]
-    
+
+            detections.append(
+                Detection(
+                    label=self._label,
+                    bbox=BoundingBox(cx=x + w // 2, cy=y + h // 2, w=w, h=h),
+                    confidence=min(1.0, circularity),
+                )
+            )
+
+        # Sort by area, limit count
+        detections.sort(key=lambda d: d.bbox.area, reverse=True)
+        return detections[: self._max_count]
+
+    def detect_batch(self, frames: Sequence[npt.NDArray]) -> list[list[Detection]]:
+        """Detect in multiple frames."""
+        return [self.detect(f) for f in frames]
+
     def set_color_range(
         self,
-        hsv_lower: Tuple[int, int, int],
-        hsv_upper: Tuple[int, int, int]
+        hsv_lower: tuple[int, int, int],
+        hsv_upper: tuple[int, int, int],
     ) -> None:
-        """
-        Update the HSV color range to detect.
-        
-        Args:
-            hsv_lower: Lower bound (H, S, V)
-            hsv_upper: Upper bound (H, S, V)
-        """
+        """Update HSV color range."""
         self._hsv_lower = np.array(hsv_lower)
         self._hsv_upper = np.array(hsv_upper)

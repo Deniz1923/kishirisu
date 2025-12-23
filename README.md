@@ -1,6 +1,10 @@
-# Kishirisu - Ball Catcher Robot Stereo Vision
+# Kishirisu 🏐
 
-Stereo vision depth calculation system for a ball catcher robot using OpenCV.
+Stereo vision depth estimation for a ball catcher robot.
+
+![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue)
+![OpenCV](https://img.shields.io/badge/opencv-4.8+-green)
+![License: MIT](https://img.shields.io/badge/license-MIT-yellow)
 
 ## Quick Start
 
@@ -8,90 +12,89 @@ Stereo vision depth calculation system for a ball catcher robot using OpenCV.
 # Install dependencies
 uv sync
 
-# Run with auto-detection (uses your camera's native resolution/FPS)
+# Run the demo
 uv run python main.py
 
-# Or specify preferred resolution
-uv run python main.py --resolution 1280x720
+# With options
+uv run python main.py --fast --resolution 1280x720
 ```
+
+## Features
+
+- **Real-time depth** - SGBM stereo matching with quality presets
+- **Mock stereo** - Single webcam generates synthetic stereo pairs
+- **Modular detection** - Plug-in interface for YOLO integration
+- **Interactive demo** - Keyboard controls, mouse depth queries
 
 ## Architecture
 
 ```
 stereo_vision/
-├── __init__.py      # Package exports
-├── config.py        # StereoConfig with auto-detection
-├── capture.py       # Abstract StereoCapture interface
-├── mock_camera.py   # MockStereoCamera (single webcam → stereo pair)
-├── depth.py         # DepthCalculator (SGBM stereo matching)
-└── detection.py     # ObjectDetector interface (for YOLO integration)
+├── config.py      # StereoConfig, Resolution, QualityPreset
+├── capture.py     # StereoCapture protocol, CameraPosition
+├── mock_camera.py # MockStereoCamera (single webcam → stereo)
+├── depth.py       # DepthCalculator, DepthResult, DepthStats
+└── detection.py   # Detection, BoundingBox, Detector protocol
 ```
 
 ## Usage
 
-### Auto-Detection (Recommended)
+### Basic Depth Calculation
 
 ```python
 from stereo_vision import StereoConfig, MockStereoCamera, DepthCalculator
 
-# Auto-detect camera resolution and FPS
-config = StereoConfig.from_camera(camera_index=0, baseline_mm=60.0)
-print(f"Detected: {config.resolution} @ {config.fps} FPS")
+# Auto-detect camera
+config = StereoConfig.from_camera(baseline_mm=65.0)
 
-# Or use the convenience method
-camera = MockStereoCamera.create_auto(camera_index=0)
-print(f"Using: {camera.actual_resolution} @ {camera.actual_fps} FPS")
-
-# Initialize depth calculator with detected config
-depth_calc = DepthCalculator(camera.config)
-
-# Capture and compute depth
-left, right = camera.capture()
-depth_map = depth_calc.compute(left, right)
-depth_mm = depth_calc.get_depth_at(depth_map, x=320, y=240)
-
-camera.release()
+with MockStereoCamera(config) as camera:
+    left, right = camera.capture()
+    
+    calc = DepthCalculator(config)
+    result = calc.compute(left, right)
+    
+    print(f"Center depth: {result.at_center():.0f}mm")
+    print(f"Valid pixels: {result.stats.valid_ratio:.1%}")
 ```
 
-### Manual Configuration
+### Quality Presets
 
 ```python
-from stereo_vision import StereoConfig, MockStereoCamera, DepthCalculator
+from stereo_vision import StereoConfig, QualityPreset
 
-# Manual configuration (e.g., for testing)
-config = StereoConfig(
-    resolution=(1920, 1080),
-    fps=30.0,
-    baseline_mm=60.0,
-    focal_length_px=1575.0,  # Or None to auto-estimate
-)
+# Fast for real-time
+config = StereoConfig.for_preset(QualityPreset.FAST)
 
-camera = MockStereoCamera(config, camera_index=0)
+# High quality for accuracy
+config = StereoConfig.for_preset(QualityPreset.QUALITY)
 ```
 
-## YOLO Integration (For Your Friend)
+### YOLO Integration
 
-The detection interface is designed for easy YOLO integration:
+For your friend implementing YOLO detection:
 
 ```python
-from stereo_vision import ObjectDetector, Detection
+from stereo_vision import Detection, BoundingBox, Detector
 from ultralytics import YOLO
 
-class YOLODetector(ObjectDetector):
+class YOLODetector:
+    """YOLO-based object detector."""
+    
     def __init__(self, model_path: str):
         self.model = YOLO(model_path)
     
-    def detect(self, frame):
+    def detect(self, frame) -> list[Detection]:
         results = self.model(frame)
         detections = []
-        for r in results[0].boxes:
-            x, y, w, h = r.xywh[0].cpu().numpy()
+        
+        for box in results[0].boxes:
+            x, y, w, h = box.xywh[0].cpu().numpy()
             detections.append(Detection(
-                label=self.model.names[int(r.cls)],
-                x=int(x), y=int(y),
-                width=int(w), height=int(h),
-                confidence=float(r.conf)
+                label=self.model.names[int(box.cls)],
+                bbox=BoundingBox(cx=int(x), cy=int(y), w=int(w), h=int(h)),
+                confidence=float(box.conf),
             ))
+        
         return detections
 ```
 
@@ -99,36 +102,55 @@ class YOLODetector(ObjectDetector):
 
 | Key | Action |
 |-----|--------|
-| Arrow keys | Move camera X/Y position |
+| Arrow keys | Move camera position |
 | +/- | Adjust simulated depth |
-| Space | Reset camera position |
+| Space | Reset position |
+| C | Cycle colormap |
 | D | Toggle depth overlay |
+| F | Toggle fast mode |
+| H | Toggle help |
 | S | Save frame |
 | Q/ESC | Quit |
-
-## Mock Camera Mode
-
-Since only one webcam is available, `MockStereoCamera` generates synthetic stereo pairs by:
-1. Capturing single frame from webcam (→ "left" image)
-2. Shifting horizontally based on simulated depth (→ "right" image)
-3. Adding slight noise for realism
-
-This allows developing and testing the depth pipeline before hardware is ready.
+| Click | Query depth at point |
 
 ## Configuration
 
-Key parameters in `StereoConfig`:
+```python
+from stereo_vision import StereoConfig, Resolution, SGBMParams
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `baseline_mm` | 60.0 | Distance between cameras (mm) |
-| `focal_length_px` | 640.0 | Camera focal length (pixels) |
-| `resolution` | (640, 480) | Camera resolution |
-| `num_disparities` | 64 | Disparity search range |
-| `block_size` | 11 | SGBM block size |
+config = StereoConfig(
+    resolution=Resolution(1280, 720),
+    baseline_mm=65.0,           # Distance between cameras
+    focal_length_px=1050.0,     # Or None to auto-estimate
+    min_depth_mm=200.0,         # Minimum valid depth
+    max_depth_mm=5000.0,        # Maximum valid depth
+    sgbm=SGBMParams(
+        num_disparities=128,    # Search range (÷16)
+        block_size=11,          # Match window (odd, ≥5)
+    ),
+)
+```
 
-## Dependencies
+## Mock Camera
 
-- Python 3.12+
+Since only one webcam is available, `MockStereoCamera` generates synthetic stereo:
+
+1. Captures single frame → "left" image
+2. Shifts horizontally based on simulated depth → "right" image  
+3. Adds sensor noise for realism
+
+This allows developing the depth pipeline before hardware arrives.
+
+## Requirements
+
+- Python 3.11+
 - OpenCV 4.8+
 - NumPy 1.26+
+
+```bash
+uv sync
+```
+
+## License
+
+MIT
