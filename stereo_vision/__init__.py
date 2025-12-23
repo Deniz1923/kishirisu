@@ -43,11 +43,15 @@ from .capture import (
 # Mock Camera
 from .mock_camera import (
     MockStereoCamera,
+    ObjectShape,
+    SceneObject,
+    SceneInfo,
     NoiseMode,
 )
 
 # Depth
 from .depth import (
+    DepthZone,
     DepthStats,
     DepthResult,
     DepthCalculator,
@@ -59,6 +63,7 @@ from .detection import (
     Detection,
     Detector,
     ObjectDetector,
+    BallDetector,
     DummyDetector,
 )
 
@@ -77,8 +82,12 @@ __all__ = [
     "BaseStereoCamera",
     # Mock Camera
     "MockStereoCamera",
+    "ObjectShape",
+    "SceneObject",
+    "SceneInfo",
     "NoiseMode",
     # Depth
+    "DepthZone",
     "DepthStats",
     "DepthResult",
     "DepthCalculator",
@@ -87,5 +96,6 @@ __all__ = [
     "Detection",
     "Detector",
     "ObjectDetector",
+    "BallDetector",
     "DummyDetector",
 ]

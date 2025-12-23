@@ -227,6 +227,7 @@ class HelpOverlay:
         ("C", "Cycle colormap"),
         ("D", "Toggle depth blend"),
         ("F", "Toggle fast mode"),
+        ("V", "Toggle verbose stats"),
         ("H", "Toggle this help"),
         ("S", "Save frame"),
         ("Q/ESC", "Quit"),
@@ -279,6 +280,7 @@ class StereoVisionDemo:
         self.show_help = False
         self.show_depth_blend = True
         self.fast_mode = config.fast_mode
+        self.verbose_mode = True  # Show detailed stats
         self.colormap_idx = 0
 
         # Stats
@@ -449,20 +451,26 @@ class StereoVisionDemo:
         # Periodic terminal output with detection depths
         if time.time() - self.last_print_time >= 0.5:
             self.last_print_time = time.time()
-            print("\n" + "=" * 70)
+            print("\n" + "=" * 80)
             print(f"[CENTER DEPTH] {center_depth:.0f}mm = {center_depth/10:.1f}cm = {center_depth/1000:.2f}m" if center_depth > 0 else "[CENTER DEPTH] No valid depth")
-            print(f"[PERFORMANCE] FPS: {self.fps:.1f} | Processing: {self.process_ms:.1f}ms")
+            print(f"[PERFORMANCE] FPS: {self.fps:.1f} | Processing: {self.process_ms:.1f}ms | Mode: {'FAST' if self.fast_mode else 'NORMAL'}")
+            
+            # Verbose depth statistics
+            if self.verbose_mode:
+                stats = result.stats
+                print(f"[DEPTH STATS]")
+                print(stats.format_verbose())
+            
+            # Detection output
             if detections_with_depth:
                 print(f"[DETECTIONS] Found {len(detections_with_depth)} object(s):")
                 for i, (det, depth_mm, pos_3d) in enumerate(detections_with_depth[:5], 1):
                     if depth_mm > 0:
                         x3d, y3d, z3d = pos_3d
-                        print(f"  {i}. {det.label.upper()} at pixel ({det.x}, {det.y})")
-                        print(f"     DEPTH: {depth_mm:.0f}mm = {depth_mm/10:.1f}cm = {depth_mm/1000:.2f}m")
-                        print(f"     3D POSITION: X={x3d:.0f}mm, Y={y3d:.0f}mm, Z={z3d:.0f}mm")
+                        print(f"  {i}. {det.label.upper()} @ ({det.x},{det.y}) -> {depth_mm:.0f}mm | 3D=({x3d:.0f},{y3d:.0f},{z3d:.0f})")
                     else:
-                        print(f"  {i}. {det.label.upper()} at pixel ({det.x}, {det.y}) - NO VALID DEPTH")
-            print("=" * 70)
+                        print(f"  {i}. {det.label.upper()} @ ({det.x},{det.y}) -> NO DEPTH")
+            print("=" * 80)
 
     def _compose_display(
         self,
@@ -543,6 +551,10 @@ class StereoVisionDemo:
         elif key == ord("c"):
             self.colormap_idx = (self.colormap_idx + 1) % len(self.COLORMAPS)
             print(f"Colormap: {self.COLORMAP_NAMES[self.colormap_idx]}")
+
+        elif key == ord("v"):
+            self.verbose_mode = not self.verbose_mode
+            print(f"Verbose mode: {'ON' if self.verbose_mode else 'OFF'}")
 
         elif key == ord("s"):
             timestamp = time.strftime("%Y%m%d_%H%M%S")

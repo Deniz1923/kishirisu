@@ -31,30 +31,157 @@ if TYPE_CHECKING:
 
 
 @dataclass(frozen=True, slots=True)
+class DepthZone:
+    """Depth zone classification for verbose analysis."""
+
+    name: str  # "near", "mid", "far"
+    range_mm: tuple[float, float]
+    pixel_count: int
+    percentage: float
+
+    def __str__(self) -> str:
+        return f"{self.name.upper()}: {self.percentage:.1f}% ({self.pixel_count:,} px)"
+
+
+@dataclass(frozen=True, slots=True)
 class DepthStats:
-    """Statistics about a depth map."""
+    """Extended statistics about a depth map.
+    
+    Attributes:
+        min_mm: Minimum valid depth
+        max_mm: Maximum valid depth
+        median_mm: Median depth value
+        mean_mm: Mean depth value
+        std_mm: Standard deviation of depth values
+        p25_mm: 25th percentile (near boundary)
+        p75_mm: 75th percentile (far boundary)
+        valid_ratio: Fraction of valid pixels (0.0 to 1.0)
+        confidence: Overall quality score (0.0 to 1.0)
+        zones: Depth zone breakdown (near/mid/far)
+    """
 
     min_mm: float
     max_mm: float
     median_mm: float
     mean_mm: float
+    std_mm: float
+    p25_mm: float
+    p75_mm: float
     valid_ratio: float  # 0.0 to 1.0
+    confidence: float  # 0.0 to 1.0
+    zones: tuple[DepthZone, DepthZone, DepthZone] | None = None
+
+    # Zone boundaries (class constants)
+    NEAR_MAX_MM: float = 1000.0
+    MID_MAX_MM: float = 3000.0
 
     @classmethod
-    def from_depth_map(cls, depth_map: npt.NDArray) -> DepthStats:
-        """Compute statistics from depth map."""
+    def from_depth_map(
+        cls,
+        depth_map: npt.NDArray,
+        near_threshold_mm: float = 1000.0,
+        far_threshold_mm: float = 3000.0,
+    ) -> DepthStats:
+        """Compute comprehensive statistics from depth map.
+        
+        Args:
+            depth_map: 2D array of depth values in mm (0 = invalid)
+            near_threshold_mm: Depth below this is "near" zone
+            far_threshold_mm: Depth above this is "far" zone
+        """
         valid = depth_map[depth_map > 0]
+        total_pixels = depth_map.size
 
         if len(valid) == 0:
-            return cls(0.0, 0.0, 0.0, 0.0, 0.0)
+            empty_zone = DepthZone("empty", (0, 0), 0, 0.0)
+            return cls(
+                min_mm=0.0,
+                max_mm=0.0,
+                median_mm=0.0,
+                mean_mm=0.0,
+                std_mm=0.0,
+                p25_mm=0.0,
+                p75_mm=0.0,
+                valid_ratio=0.0,
+                confidence=0.0,
+                zones=(empty_zone, empty_zone, empty_zone),
+            )
+
+        # Basic statistics
+        min_d = float(np.min(valid))
+        max_d = float(np.max(valid))
+        median_d = float(np.median(valid))
+        mean_d = float(np.mean(valid))
+        std_d = float(np.std(valid))
+        p25 = float(np.percentile(valid, 25))
+        p75 = float(np.percentile(valid, 75))
+        valid_ratio = len(valid) / total_pixels
+
+        # Compute depth zones
+        near_mask = valid < near_threshold_mm
+        far_mask = valid >= far_threshold_mm
+        mid_mask = ~near_mask & ~far_mask
+
+        near_count = int(np.sum(near_mask))
+        mid_count = int(np.sum(mid_mask))
+        far_count = int(np.sum(far_mask))
+        valid_count = len(valid)
+
+        zones = (
+            DepthZone(
+                "near",
+                (min_d, near_threshold_mm),
+                near_count,
+                100.0 * near_count / valid_count if valid_count > 0 else 0.0,
+            ),
+            DepthZone(
+                "mid",
+                (near_threshold_mm, far_threshold_mm),
+                mid_count,
+                100.0 * mid_count / valid_count if valid_count > 0 else 0.0,
+            ),
+            DepthZone(
+                "far",
+                (far_threshold_mm, max_d),
+                far_count,
+                100.0 * far_count / valid_count if valid_count > 0 else 0.0,
+            ),
+        )
+
+        # Confidence score based on:
+        # - Valid pixel ratio (50% weight)
+        # - Low noise / std deviation (25% weight)
+        # - Reasonable depth range (25% weight)
+        valid_score = min(1.0, valid_ratio / 0.7)  # Normalize to 70% as "good"
+        range_score = 1.0 if 100 < (max_d - min_d) < 4000 else 0.5
+        noise_score = max(0.0, 1.0 - std_d / 1000.0)  # Lower std = higher score
+        confidence = 0.5 * valid_score + 0.25 * range_score + 0.25 * noise_score
 
         return cls(
-            min_mm=float(np.min(valid)),
-            max_mm=float(np.max(valid)),
-            median_mm=float(np.median(valid)),
-            mean_mm=float(np.mean(valid)),
-            valid_ratio=len(valid) / depth_map.size,
+            min_mm=min_d,
+            max_mm=max_d,
+            median_mm=median_d,
+            mean_mm=mean_d,
+            std_mm=std_d,
+            p25_mm=p25,
+            p75_mm=p75,
+            valid_ratio=valid_ratio,
+            confidence=confidence,
+            zones=zones,
         )
+
+    def format_verbose(self) -> str:
+        """Format stats as multi-line verbose string."""
+        lines = [
+            f"  Range: {self.min_mm:.0f} - {self.max_mm:.0f}mm",
+            f"  Mean: {self.mean_mm:.0f}mm | Median: {self.median_mm:.0f}mm | Std: {self.std_mm:.0f}mm",
+            f"  Percentiles: P25={self.p25_mm:.0f}mm | P75={self.p75_mm:.0f}mm",
+            f"  Valid: {self.valid_ratio*100:.1f}% | Confidence: {self.confidence*100:.0f}%",
+        ]
+        if self.zones:
+            lines.append(f"  Zones: {self.zones[0]} | {self.zones[1]} | {self.zones[2]}")
+        return "\n".join(lines)
+
 
 
 @dataclass(frozen=True, slots=True)

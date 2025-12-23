@@ -180,6 +180,87 @@ class Detector(Protocol):
 ObjectDetector = Detector
 
 
+# =============================================================================
+# YOLO Integration Interface
+# =============================================================================
+#
+# Your friend should implement the BallDetector class below.
+# This provides a clear contract for ball detection integration.
+#
+
+
+from abc import ABC, abstractmethod
+
+
+class BallDetector(ABC):
+    """
+    Abstract base class for ball detection.
+    
+    IMPLEMENT THIS CLASS for YOLO ball recognition integration.
+    
+    Your implementation should:
+    1. Load your YOLO model in __init__
+    2. Run inference in detect_balls()
+    3. Convert YOLO outputs to Detection objects
+    
+    Example implementation (yolo_detector.py):
+    
+        from ultralytics import YOLO
+        from stereo_vision import BallDetector, Detection, BoundingBox
+        
+        class YOLOBallDetector(BallDetector):
+            def __init__(self, model_path: str = "yolov8n.pt"):
+                self.model = YOLO(model_path)
+                self.ball_class_id = 32  # COCO sports ball class
+            
+            def detect_balls(self, frame):
+                results = self.model(frame, verbose=False)
+                detections = []
+                
+                for box in results[0].boxes:
+                    if int(box.cls) == self.ball_class_id:
+                        x, y, w, h = box.xywh[0].cpu().numpy()
+                        detections.append(Detection(
+                            label="ball",
+                            bbox=BoundingBox(cx=int(x), cy=int(y), w=int(w), h=int(h)),
+                            confidence=float(box.conf),
+                        ))
+                
+                return detections
+    """
+
+    @abstractmethod
+    def detect_balls(self, frame: npt.NDArray) -> list[Detection]:
+        """
+        Detect balls in a single frame.
+
+        Args:
+            frame: BGR image as numpy array (H, W, 3)
+
+        Returns:
+            List of Detection objects for detected balls.
+            Each Detection should have:
+            - label: "ball" (or specific ball type)
+            - bbox: BoundingBox with center (cx, cy) and size (w, h)
+            - confidence: float between 0.0 and 1.0
+        """
+        ...
+
+    def detect(self, frame: npt.NDArray) -> list[Detection]:
+        """Alias for detect_balls() to satisfy Detector protocol."""
+        return self.detect_balls(frame)
+
+    # Optional: Override these for batch processing or tracking
+    
+    def detect_balls_batch(self, frames: Sequence[npt.NDArray]) -> list[list[Detection]]:
+        """Detect balls in multiple frames. Override for batch inference."""
+        return [self.detect_balls(f) for f in frames]
+
+    def warmup(self) -> None:
+        """Optional warmup for GPU initialization. Override if needed."""
+        pass
+
+
 class DummyDetector:
     """
     Simple color-based detector for testing.
