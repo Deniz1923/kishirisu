@@ -382,3 +382,49 @@ class StereoConfig:
     def to_json(self) -> str:
         """Serialize to JSON string."""
         return json.dumps(self.to_dict(), indent=2)
+
+    @classmethod
+    def from_dict(cls, data: dict) -> Self:
+        """
+        Create configuration from dictionary.
+
+        Args:
+            data: Dictionary with configuration values (from to_dict())
+
+        Returns:
+            StereoConfig instance
+        """
+        resolution = Resolution(*data["resolution"])
+        
+        sgbm_data = data.get("sgbm", {})
+        sgbm = SGBMParams(
+            num_disparities=sgbm_data.get("num_disparities", 64),
+            block_size=sgbm_data.get("block_size", 11),
+        )
+        
+        pp = data.get("principal_point")
+        principal_point = tuple(pp) if pp else None
+        
+        return cls(
+            resolution=resolution,
+            fps=data.get("fps", 30.0),
+            focal_length_px=data.get("focal_length_px"),
+            principal_point=principal_point,
+            baseline_mm=data.get("baseline_mm", 60.0),
+            min_depth_mm=data.get("min_depth_mm", 200.0),
+            max_depth_mm=data.get("max_depth_mm", 5000.0),
+            sgbm=sgbm,
+        )
+
+    @classmethod
+    def from_json(cls, json_str: str) -> Self:
+        """
+        Create configuration from JSON string.
+
+        Args:
+            json_str: JSON string (from to_json())
+
+        Returns:
+            StereoConfig instance
+        """
+        return cls.from_dict(json.loads(json_str))
