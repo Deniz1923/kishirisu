@@ -16,8 +16,11 @@ Controls:
 - Space: Reset camera to center
 - 'c': Toggle colormap for depth visualization
 - 'd': Toggle depth map overlay
+- 'f': Toggle fast mode (downscaled processing)
+- 'h': Toggle help overlay
 - 's': Save current frame
 - 'q' or ESC: Quit
+- Mouse click: Print depth at clicked point
 
 Usage:
 ------
@@ -120,6 +123,11 @@ Examples:
         help="Disable object detection (runs faster)"
     )
     parser.add_argument(
+        "--fast", "-F",
+        action="store_true",
+        help="Enable fast mode (downscaled depth computation)"
+    )
+    parser.add_argument(
         "--save-dir",
         type=Path,
         default=Path("captures"),
@@ -135,7 +143,11 @@ def create_info_panel(
     camera_y: float,
     simulated_depth: float,
     fps: float,
-    detections: list
+    detections: list,
+    depth_stats: dict = None,
+    center_depth: float = 0,
+    fast_mode: bool = False,
+    process_time_ms: float = 0
 ) -> np.ndarray:
     """
     Create an information panel showing current state.
@@ -147,12 +159,16 @@ def create_info_panel(
         simulated_depth: Current simulated depth
         fps: Current frames per second
         detections: List of current detections
+        depth_stats: Dictionary with depth statistics
+        center_depth: Depth at image center in mm
+        fast_mode: Whether fast mode is enabled
+        process_time_ms: Processing time in milliseconds
         
     Returns:
         BGR image of the info panel
     """
     # Create dark panel
-    height = 120 + len(detections) * 25
+    height = 200 + len(detections) * 25
     panel = np.zeros((height, width, 3), dtype=np.uint8)
     panel[:] = (40, 40, 40)  # Dark gray background
     
@@ -163,25 +179,43 @@ def create_info_panel(
     y_offset = 25
     
     # Title
-    cv2.putText(panel, "=== STEREO VISION STATUS ===", (10, y_offset), 
+    mode_text = " [FAST]" if fast_mode else ""
+    cv2.putText(panel, f"=== STEREO VISION STATUS{mode_text} ===", (10, y_offset), 
                 font, 0.6, (100, 255, 100), 1)
     y_offset += 30
     
-    # Camera position
-    cv2.putText(panel, f"Camera Position: X={camera_x:+.1f}mm  Y={camera_y:+.1f}mm", 
-                (10, y_offset), font, font_scale, color, 1)
+    # FPS and processing time
+    fps_color = (100, 255, 100) if fps >= 15 else (100, 100, 255)
+    cv2.putText(panel, f"FPS: {fps:.1f}  |  Process: {process_time_ms:.1f}ms", 
+                (10, y_offset), font, font_scale, fps_color, 1)
     y_offset += 25
+    
+    # CENTER DEPTH (prominent display)
+    if center_depth > 0:
+        depth_text = f"CENTER DEPTH: {center_depth:.0f}mm ({center_depth/10:.1f}cm)"
+        cv2.putText(panel, depth_text, (10, y_offset), font, 0.6, (0, 255, 255), 2)
+    else:
+        cv2.putText(panel, "CENTER DEPTH: --", (10, y_offset), font, 0.6, (100, 100, 100), 1)
+    y_offset += 30
+    
+    # Depth statistics
+    if depth_stats:
+        stats_text = f"Depth Range: {depth_stats['min_depth']:.0f} - {depth_stats['max_depth']:.0f}mm"
+        cv2.putText(panel, stats_text, (10, y_offset), font, font_scale, (200, 200, 100), 1)
+        y_offset += 20
+        stats_text2 = f"Median: {depth_stats['median_depth']:.0f}mm  Valid: {depth_stats['valid_percent']:.1f}%"
+        cv2.putText(panel, stats_text2, (10, y_offset), font, font_scale, (200, 200, 100), 1)
+        y_offset += 25
+    
+    # Camera position
+    cv2.putText(panel, f"Camera: X={camera_x:+.1f}mm  Y={camera_y:+.1f}mm", 
+                (10, y_offset), font, font_scale, color, 1)
+    y_offset += 20
     
     # Simulated depth
-    cv2.putText(panel, f"Simulated Depth: {simulated_depth:.0f}mm", 
+    cv2.putText(panel, f"Simulated: {simulated_depth:.0f}mm", 
                 (10, y_offset), font, font_scale, color, 1)
     y_offset += 25
-    
-    # FPS
-    fps_color = (100, 255, 100) if fps >= 15 else (100, 100, 255)
-    cv2.putText(panel, f"FPS: {fps:.1f}", 
-                (10, y_offset), font, font_scale, fps_color, 1)
-    y_offset += 30
     
     # Detections
     if detections:
@@ -189,7 +223,7 @@ def create_info_panel(
                     (10, y_offset), font, font_scale, (255, 200, 100), 1)
         y_offset += 25
         
-        for det in detections:
+        for det in detections[:3]:  # Limit to 3 detections to save space
             text = f"  {det.label}: ({det.x}, {det.y}) conf={det.confidence:.2f}"
             cv2.putText(panel, text, (10, y_offset), font, 0.4, color, 1)
             y_offset += 20
@@ -198,6 +232,43 @@ def create_info_panel(
                     (10, y_offset), font, font_scale, (150, 150, 150), 1)
     
     return panel
+
+
+def create_help_overlay(width: int, height: int) -> np.ndarray:
+    """
+    Create a semi-transparent help overlay showing keyboard shortcuts.
+    """
+    overlay = np.zeros((height, width, 3), dtype=np.uint8)
+    
+    # Semi-transparent background
+    cv2.rectangle(overlay, (50, 50), (width - 50, height - 50), (40, 40, 40), -1)
+    cv2.rectangle(overlay, (50, 50), (width - 50, height - 50), (100, 255, 100), 2)
+    
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    y = 90
+    
+    cv2.putText(overlay, "KEYBOARD SHORTCUTS", (70, y), font, 0.8, (100, 255, 100), 2)
+    y += 40
+    
+    shortcuts = [
+        ("Arrow Keys", "Move camera position"),
+        ("+/-", "Adjust simulated depth"),
+        ("Space", "Reset camera position"),
+        ("C", "Cycle colormap"),
+        ("D", "Toggle depth overlay"),
+        ("F", "Toggle fast mode"),
+        ("H", "Toggle this help"),
+        ("S", "Save frame"),
+        ("Q/ESC", "Quit"),
+        ("Mouse Click", "Print depth at point"),
+    ]
+    
+    for key, desc in shortcuts:
+        cv2.putText(overlay, f"{key:12s}", (70, y), font, 0.5, (255, 200, 100), 1)
+        cv2.putText(overlay, desc, (180, y), font, 0.5, (200, 200, 200), 1)
+        y += 25
+    
+    return overlay
 
 
 def create_display_frame(
@@ -389,19 +460,68 @@ def main():
     print("    Arrow keys  - Move camera X/Y")
     print("    +/-         - Adjust simulated depth")
     print("    Space       - Reset camera position")
+    print("    F           - Toggle FAST mode")
+    print("    H           - Toggle help overlay")
     print("    D           - Toggle depth overlay")
     print("    S           - Save current frame")
     print("    Q/ESC       - Quit")
+    print("    Click       - Print depth at mouse position")
     print("=" * 60)
     print()
     print("Starting capture loop... Press 'q' to quit.")
+    print()
     
     # State variables
     show_depth_overlay = True
+    show_help = False
+    fast_mode = args.fast
     frame_count = 0
     fps = 0.0
     last_fps_time = time.time()
+    last_depth_print_time = time.time()
     detections = []
+    depth_stats = None
+    center_depth = 0.0
+    process_time_ms = 0.0
+    
+    # Mouse callback state
+    click_depth_map = None
+    click_depth_calc = depth_calc
+    
+    def mouse_callback(event, x, y, flags, param):
+        """Handle mouse clicks to print depth at clicked point."""
+        nonlocal click_depth_map, click_depth_calc
+        if event == cv2.EVENT_LBUTTONDOWN:
+            if click_depth_map is not None:
+                # Account for display scaling and layout
+                # The display is: top row = left|right, bottom row = depth|info
+                # Each panel is at scale
+                panel_w = int(config.width * args.scale)
+                panel_h = int(config.height * args.scale)
+                
+                # Check if click is in left camera or depth panel
+                if y < panel_h:  # Top row
+                    if x < panel_w:  # Left camera
+                        img_x = int(x / args.scale)
+                        img_y = int(y / args.scale)
+                    else:
+                        return  # Right camera, skip
+                else:  # Bottom row
+                    if x < panel_w:  # Depth panel
+                        img_x = int(x / args.scale)
+                        img_y = int((y - panel_h) / args.scale)
+                    else:
+                        return  # Info panel, skip
+                
+                depth_at_click = click_depth_calc.get_depth_at(click_depth_map, img_x, img_y)
+                if depth_at_click > 0:
+                    x_3d, y_3d, z_3d = click_depth_calc.pixel_to_3d(img_x, img_y, depth_at_click)
+                    print(f"\n>>> CLICKED @ ({img_x}, {img_y}): depth={depth_at_click:.0f}mm  3D=({x_3d:.0f}, {y_3d:.0f}, {z_3d:.0f})mm <<<")
+                else:
+                    print(f"\n>>> CLICKED @ ({img_x}, {img_y}): No valid depth <<<")
+    
+    cv2.namedWindow("Stereo Vision Demo")
+    cv2.setMouseCallback("Stereo Vision Demo", mouse_callback)
     
     # Colormap options for depth visualization
     colormaps = [cv2.COLORMAP_JET, cv2.COLORMAP_HOT, cv2.COLORMAP_RAINBOW]
@@ -418,14 +538,35 @@ def main():
                 print(f"Capture error: {e}")
                 break
             
-            # ---- Compute depth ----
-            depth_map = depth_calc.compute(left, right)
+            # ---- Compute depth (with optional fast mode) ----
+            depth_start = time.time()
+            if fast_mode:
+                depth_map = depth_calc.compute_fast(left, right, scale=0.5)
+            else:
+                depth_map = depth_calc.compute(left, right)
+            process_time_ms = (time.time() - depth_start) * 1000
+            
+            # Store for mouse callback
+            click_depth_map = depth_map
+            
+            # ---- Get depth statistics ----
+            depth_stats = depth_calc.get_depth_stats(depth_map)
+            center_depth = depth_calc.get_depth_at(
+                depth_map, config.width // 2, config.height // 2, window_size=15
+            )
             
             # ---- Colorize depth for visualization ----
             depth_colored = depth_calc.visualize_depth(
                 depth_map,
                 colormap=colormaps[colormap_idx]
             )
+            
+            # ---- Draw center crosshair and depth on depth map ----
+            cx, cy = config.width // 2, config.height // 2
+            cv2.drawMarker(depth_colored, (cx, cy), (255, 255, 255), cv2.MARKER_CROSS, 20, 2)
+            if center_depth > 0:
+                cv2.putText(depth_colored, f"{center_depth:.0f}mm", (cx + 15, cy - 10),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
             
             # ---- Detect objects ----
             if detector is not None:
@@ -458,7 +599,11 @@ def main():
                 camera_y=camera.current_y,
                 simulated_depth=camera.simulated_depth,
                 fps=fps,
-                detections=detections
+                detections=detections,
+                depth_stats=depth_stats,
+                center_depth=center_depth,
+                fast_mode=fast_mode,
+                process_time_ms=process_time_ms
             )
             
             # ---- Create combined display ----
@@ -468,8 +613,21 @@ def main():
                 scale=args.scale
             )
             
+            # ---- Add help overlay if enabled ----
+            if show_help:
+                help_overlay = create_help_overlay(display.shape[1], display.shape[0])
+                display = cv2.addWeighted(display, 0.7, help_overlay, 0.3, 0)
+            
             # ---- Show the display ----
             cv2.imshow("Stereo Vision Demo", display)
+            
+            # ---- Periodic depth printing to terminal ----
+            if time.time() - last_depth_print_time >= 0.5:
+                last_depth_print_time = time.time()
+                if center_depth > 0:
+                    print(f"[DEPTH] Center: {center_depth:.0f}mm ({center_depth/10:.1f}cm) | Range: {depth_stats['min_depth']:.0f}-{depth_stats['max_depth']:.0f}mm | FPS: {fps:.1f}")
+                else:
+                    print(f"[DEPTH] Center: -- | FPS: {fps:.1f}")
             
             # ---- Handle keyboard input ----
             key = cv2.waitKey(1) & 0xFF
@@ -486,6 +644,13 @@ def main():
                 colormap_idx = (colormap_idx + 1) % len(colormaps)
                 names = ["JET", "HOT", "RAINBOW"]
                 print(f"Colormap: {names[colormap_idx]}")
+            
+            elif key == ord('f'):  # Toggle fast mode
+                fast_mode = not fast_mode
+                print(f"Fast mode: {'ON' if fast_mode else 'OFF'}")
+            
+            elif key == ord('h'):  # Toggle help overlay
+                show_help = not show_help
             
             elif key == ord('s'):  # Save frame
                 timestamp = time.strftime("%Y%m%d_%H%M%S")

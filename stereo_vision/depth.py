@@ -392,3 +392,145 @@ class DepthCalculator:
     def config(self) -> StereoConfig:
         """Get the stereo configuration."""
         return self._config
+    
+    def compute_fast(
+        self,
+        left_frame: np.ndarray,
+        right_frame: np.ndarray,
+        scale: float = 0.5,
+        filter_invalid: bool = True
+    ) -> np.ndarray:
+        """
+        Fast depth computation with downscaling.
+        
+        This method downscales images before SGBM processing for faster
+        computation, then upscales the result. Great for real-time use.
+        
+        Args:
+            left_frame: Left camera image (BGR, HxWx3)
+            right_frame: Right camera image (BGR, HxWx3)
+            scale: Downscale factor (0.5 = half resolution, 2x faster)
+            filter_invalid: If True, invalid depths are set to 0
+            
+        Returns:
+            Depth map at original resolution (upscaled from lower res computation)
+        """
+        h, w = left_frame.shape[:2]
+        new_w = int(w * scale)
+        new_h = int(h * scale)
+        
+        # Downscale images
+        left_small = cv2.resize(left_frame, (new_w, new_h), interpolation=cv2.INTER_AREA)
+        right_small = cv2.resize(right_frame, (new_w, new_h), interpolation=cv2.INTER_AREA)
+        
+        # Compute depth at lower resolution
+        left_gray = cv2.cvtColor(left_small, cv2.COLOR_BGR2GRAY)
+        right_gray = cv2.cvtColor(right_small, cv2.COLOR_BGR2GRAY)
+        
+        disparity_fixed = self._stereo_matcher.compute(left_gray, right_gray)
+        disparity = disparity_fixed.astype(np.float32) / 16.0
+        
+        # Scale disparity back (disparity scales inversely with resolution)
+        disparity = disparity / scale
+        
+        # Convert to depth
+        with np.errstate(divide='ignore', invalid='ignore'):
+            depth_map_small = self._depth_factor / disparity
+        
+        # Upscale depth map
+        depth_map = cv2.resize(depth_map_small, (w, h), interpolation=cv2.INTER_LINEAR)
+        
+        # Filter invalid values
+        if filter_invalid:
+            invalid_mask = (
+                (depth_map <= 0) |
+                (np.isinf(depth_map)) |
+                (np.isnan(depth_map)) |
+                (depth_map < self._config.min_depth_mm) |
+                (depth_map > self._config.max_depth_mm)
+            )
+            depth_map[invalid_mask] = 0
+        
+        return depth_map
+    
+    def get_depth_stats(self, depth_map: np.ndarray) -> dict:
+        """
+        Get statistics about the depth map.
+        
+        Args:
+            depth_map: Depth map from compute()
+            
+        Returns:
+            Dictionary with depth statistics:
+            - min_depth: Minimum valid depth (mm)
+            - max_depth: Maximum valid depth (mm)
+            - median_depth: Median valid depth (mm)
+            - mean_depth: Mean valid depth (mm)
+            - valid_percent: Percentage of pixels with valid depth
+        """
+        valid_depths = depth_map[depth_map > 0]
+        
+        if len(valid_depths) == 0:
+            return {
+                'min_depth': 0,
+                'max_depth': 0,
+                'median_depth': 0,
+                'mean_depth': 0,
+                'valid_percent': 0.0
+            }
+        
+        return {
+            'min_depth': float(np.min(valid_depths)),
+            'max_depth': float(np.max(valid_depths)),
+            'median_depth': float(np.median(valid_depths)),
+            'mean_depth': float(np.mean(valid_depths)),
+            'valid_percent': 100.0 * len(valid_depths) / depth_map.size
+        }
+    
+    def smooth_depth(
+        self,
+        depth_map: np.ndarray,
+        d: int = 5,
+        sigma_color: float = 50,
+        sigma_space: float = 50
+    ) -> np.ndarray:
+        """
+        Apply bilateral filtering to smooth depth map while preserving edges.
+        
+        Bilateral filtering is ideal for depth maps because it:
+        - Smooths noise in flat regions
+        - Preserves sharp edges at object boundaries
+        
+        Args:
+            depth_map: Input depth map
+            d: Diameter of each pixel neighborhood (larger = more smoothing)
+            sigma_color: Filter sigma in the depth domain
+            sigma_space: Filter sigma in the coordinate space
+            
+        Returns:
+            Smoothed depth map
+        """
+        # Normalize depth to 0-1 range for bilateral filter
+        valid_mask = depth_map > 0
+        if not np.any(valid_mask):
+            return depth_map.copy()
+        
+        depth_min = np.min(depth_map[valid_mask])
+        depth_max = np.max(depth_map[valid_mask])
+        depth_range = depth_max - depth_min
+        
+        if depth_range < 1:
+            return depth_map.copy()
+        
+        # Normalize to 0-255 for bilateral filter
+        normalized = np.zeros_like(depth_map, dtype=np.float32)
+        normalized[valid_mask] = (depth_map[valid_mask] - depth_min) / depth_range * 255
+        
+        # Apply bilateral filter
+        smoothed = cv2.bilateralFilter(normalized.astype(np.float32), d, sigma_color, sigma_space)
+        
+        # Denormalize back to original range
+        result = np.zeros_like(depth_map)
+        result[valid_mask] = smoothed[valid_mask] / 255 * depth_range + depth_min
+        
+        return result
