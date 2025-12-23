@@ -16,15 +16,17 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 from enum import Enum, auto
-from functools import cached_property
-from typing import TYPE_CHECKING, NamedTuple, Self
 
 import cv2
 import numpy as np
 
 if TYPE_CHECKING:
     import numpy.typing as npt
+from typing import NamedTuple, Self
+
+
 
 
 class Resolution(NamedTuple):
@@ -212,6 +214,7 @@ class StereoConfig:
     _focal: float = field(init=False, repr=False, compare=False)
     _cx: float = field(init=False, repr=False, compare=False)
     _cy: float = field(init=False, repr=False, compare=False)
+    _depth_factor: float = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         """Validate configuration and compute derived values."""
@@ -246,6 +249,9 @@ class StereoConfig:
         object.__setattr__(self, "_cx", cx)
         object.__setattr__(self, "_cy", cy)
 
+        # Pre-compute depth factor
+        object.__setattr__(self, "_depth_factor", focal * self.baseline_mm)
+
     @property
     def width(self) -> int:
         """Image width in pixels."""
@@ -271,14 +277,13 @@ class StereoConfig:
         """Principal point Y coordinate."""
         return self._cy
 
-    @cached_property
+    @property
     def depth_factor(self) -> float:
         """Pre-computed focal_length * baseline for depth calculation."""
-        return self._focal * self.baseline_mm
+        return self._depth_factor
 
-    @cached_property
-    def camera_matrix(self) -> npt.NDArray[np.float64]:
-        """3x3 camera intrinsic matrix K."""
+    def get_camera_matrix(self) -> "npt.NDArray[np.float64]":
+        """Get 3x3 camera intrinsic matrix K."""
         return np.array(
             [
                 [self._focal, 0, self._cx],
