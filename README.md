@@ -12,16 +12,20 @@ Stereo vision depth estimation for a ball catcher robot.
 # Install dependencies
 uv sync
 
-# Run the demo
+# Run with mock camera (synthetic data for development)
+uv run python main.py --mock
+
+# Run with real stereo camera
 uv run python main.py
 
 # With options
-uv run python main.py --fast --resolution 1280x720
+uv run python main.py --mock --fast --resolution 1280x720
 ```
 
 ## Features
 
-- **Real-time depth** - SGBM stereo matching with quality presets
+- **Accurate depth** - WLS edge-preserving filter, left-right consistency, temporal smoothing
+- **Real-time modes** - SGBM stereo matching with quality presets (FAST/BALANCED/QUALITY)
 - **Verbose statistics** - Depth zones, percentiles, confidence scoring
 - **Mock stereo** - Synthetic stereo pairs with diverse objects
 - **YOLO-ready detection** - `BallDetector` interface for easy integration
@@ -31,11 +35,12 @@ uv run python main.py --fast --resolution 1280x720
 
 ```
 stereo_vision/
-├── config.py      # StereoConfig, Resolution, QualityPreset
-├── capture.py     # StereoCapture protocol, CameraPosition
-├── mock_camera.py # MockStereoCamera (single webcam → stereo)
-├── depth.py       # DepthCalculator, DepthResult, DepthStats
-└── detection.py   # Detection, BoundingBox, Detector protocol
+├── config.py       # StereoConfig, DepthFilterParams, QualityPreset
+├── capture.py      # StereoCapture protocol, CameraPosition
+├── mock_camera.py  # MockStereoCamera (synthetic stereo for testing)
+├── real_camera.py  # RealStereoCamera (hardware capture)
+├── depth.py        # DepthCalculator, DepthResult, DepthStats
+└── detection.py    # Detection, BoundingBox, Detector protocol
 ```
 
 ## Usage
@@ -135,19 +140,19 @@ for det in detections:
 
 ## Demo Controls
 
-| Key | Action |
-|-----|--------|
-| Arrow keys | Move camera position |
-| +/- | Adjust simulated depth |
-| Space | Reset position |
-| C | Cycle colormap |
-| D | Toggle depth overlay |
-| F | Toggle fast mode |
-| V | Toggle verbose stats |
-| H | Toggle help |
-| S | Save frame |
-| Q/ESC | Quit |
-| Click | Query depth at point |
+| Key | Action | Mode |
+|-----|--------|------|
+| Arrow keys | Move camera position | Mock only |
+| +/- | Adjust simulated depth | Mock only |
+| Space | Reset position | Mock only |
+| C | Cycle colormap | All |
+| D | Toggle depth overlay | All |
+| F | Toggle fast mode | All |
+| V | Toggle verbose stats | All |
+| H | Toggle help | All |
+| S | Save frame | All |
+| Q/ESC | Quit | All |
+| Click | Query depth at point | All |
 
 ## Configuration
 
@@ -167,15 +172,82 @@ config = StereoConfig(
 )
 ```
 
+### Depth Filtering (Accuracy)
+
+Fine-tune depth accuracy with `DepthFilterParams`:
+
+```python
+from stereo_vision import StereoConfig, DepthFilterParams
+
+config = StereoConfig(
+    baseline_mm=65.0,
+    depth_filter=DepthFilterParams(
+        use_wls_filter=True,    # Edge-preserving WLS smoothing
+        wls_lambda=8000.0,      # Higher = smoother (8000-16000)
+        wls_sigma=1.5,          # Higher = more edge-preserving
+        left_right_check=True,  # Validate with right-to-left match
+        lr_threshold=1,         # Max disparity difference (pixels)
+        use_bilateral=False,    # Pre-filter input images
+        temporal_alpha=0.2,     # Frame smoothing (0=off, 0.3=moderate)
+    ),
+)
+```
+
+> **Note**: WLS filter requires `opencv-contrib-python`. Install with:
+> ```bash
+> uv add opencv-contrib-python
+> ```
+
+## Real Camera Setup
+
+The `RealStereoCamera` class supports two capture modes:
+
+### Side-by-Side Stereo (Split Mode)
+
+For cameras with stereo lens adapters that output a combined side-by-side image:
+
+```python
+from stereo_vision import RealStereoCamera, StereoConfig, CaptureMode
+
+config = StereoConfig.from_camera(camera_index=0, baseline_mm=65.0)
+camera = RealStereoCamera(config, camera_index=0, mode=CaptureMode.SPLIT)
+
+left, right = camera.capture()
+camera.release()
+```
+
+### Dual Camera Setup
+
+For two separate USB cameras:
+
+```python
+from stereo_vision import RealStereoCamera, CaptureMode
+
+camera = RealStereoCamera(
+    config,
+    camera_index=0,          # Left camera
+    mode=CaptureMode.DUAL,
+    right_camera_index=1,    # Right camera
+)
+```
+
+### Fallback Behavior
+
+The demo app automatically falls back to mock camera if real camera fails to open.
+
 ## Mock Camera
 
-Since only one webcam is available, `MockStereoCamera` generates synthetic stereo:
+For development without hardware, `MockStereoCamera` generates synthetic stereo:
 
-1. Captures single frame → "left" image
-2. Shifts horizontally based on simulated depth → "right" image  
-3. Adds sensor noise for realism
+1. Generates procedural scene with depth map
+2. Creates left image from scene
+3. Shifts horizontally based on depth → right image  
+4. Adds sensor noise for realism
 
-This allows developing the depth pipeline before hardware arrives.
+```bash
+# Always use mock camera
+uv run python main.py --mock
+```
 
 ## Requirements
 

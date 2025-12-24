@@ -39,12 +39,15 @@ import numpy as np
 from stereo_vision import (
     StereoConfig,
     MockStereoCamera,
+    RealStereoCamera,
+    CaptureMode,
     DepthCalculator,
     DepthStats,
     DummyDetector,
     Detection,
     Resolution,
     QualityPreset,
+    StereoCapture,
 )
 
 if TYPE_CHECKING:
@@ -69,6 +72,7 @@ class DemoConfig:
     enable_detector: bool = True
     save_dir: Path = field(default_factory=lambda: Path("captures"))
     preset: QualityPreset = QualityPreset.BALANCED
+    use_mock_camera: bool = False  # Default to real camera
 
     @classmethod
     def from_args(cls, args: argparse.Namespace) -> DemoConfig:
@@ -83,6 +87,7 @@ class DemoConfig:
             fast_mode=args.fast,
             enable_detector=not args.no_detector,
             save_dir=Path(args.save_dir),
+            use_mock_camera=args.mock,
         )
 
 
@@ -116,6 +121,10 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--save-dir", type=str, default="captures", help="Save directory"
+    )
+    parser.add_argument(
+        "--mock", "-m", action="store_true",
+        help="Use mock camera (synthetic data) instead of real hardware"
     )
 
     return parser.parse_args()
@@ -271,7 +280,7 @@ class StereoVisionDemo:
 
     def __init__(self, config: DemoConfig) -> None:
         self.config = config
-        self.camera: MockStereoCamera | None = None
+        self.camera: MockStereoCamera | RealStereoCamera | None = None
         self.depth_calc: DepthCalculator | None = None
         self.detector: DummyDetector | None = None
 
@@ -310,12 +319,31 @@ class StereoVisionDemo:
 
         # Initialize camera
         print("[2/4] Initializing camera...")
-        self.camera = MockStereoCamera(
-            config=stereo_config,
-            camera_index=self.config.camera_index,
-            simulated_depth_mm=self.config.simulated_depth_mm,
-            add_noise=True,
-        )
+        if self.config.use_mock_camera:
+            print("        Using MOCK camera (synthetic data)")
+            self.camera = MockStereoCamera(
+                config=stereo_config,
+                camera_index=self.config.camera_index,
+                simulated_depth_mm=self.config.simulated_depth_mm,
+                add_noise=True,
+            )
+        else:
+            print("        Using REAL camera")
+            try:
+                self.camera = RealStereoCamera(
+                    config=stereo_config,
+                    camera_index=self.config.camera_index,
+                    mode=CaptureMode.SPLIT,
+                )
+            except RuntimeError as e:
+                print(f"        [WARNING] Failed to open real camera: {e}")
+                print("        Falling back to mock camera...")
+                self.camera = MockStereoCamera(
+                    config=stereo_config,
+                    camera_index=self.config.camera_index,
+                    simulated_depth_mm=self.config.simulated_depth_mm,
+                    add_noise=True,
+                )
 
         # Initialize depth calculator
         print("[3/4] Initializing depth calculator...")
@@ -500,12 +528,21 @@ class StereoVisionDemo:
             depth_display = depth
         cv2.putText(depth_display, "DEPTH", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
 
-        # Info panel
+        # Info panel - handle mock vs real camera properties
+        if isinstance(self.camera, MockStereoCamera):
+            camera_x = self.camera.current_x
+            camera_y = self.camera.current_y
+            sim_depth = self.camera.simulated_depth
+        else:
+            camera_x = 0.0
+            camera_y = 0.0
+            sim_depth = 0.0  # Not applicable for real camera
+
         info = InfoPanel.render(
             width=w,
-            camera_x=self.camera.current_x,
-            camera_y=self.camera.current_y,
-            sim_depth=self.camera.simulated_depth,
+            camera_x=camera_x,
+            camera_y=camera_y,
+            sim_depth=sim_depth,
             fps=self.fps,
             center_depth=center_depth,
             stats=stats,
@@ -562,24 +599,26 @@ class StereoVisionDemo:
             # Would save display here
             print(f"Saved: {path}")
 
-        elif key == ord(" "):
-            self.camera.reset_position()
+        # Mock camera only controls
+        elif isinstance(self.camera, MockStereoCamera):
+            if key == ord(" "):
+                self.camera.reset_position()
 
-        elif key in (ord("="), ord("+")):
-            self.camera.set_simulated_depth(self.camera.simulated_depth + 100)
+            elif key in (ord("="), ord("+")):
+                self.camera.set_simulated_depth(self.camera.simulated_depth + 100)
 
-        elif key == ord("-"):
-            self.camera.set_simulated_depth(max(200, self.camera.simulated_depth - 100))
+            elif key == ord("-"):
+                self.camera.set_simulated_depth(max(200, self.camera.simulated_depth - 100))
 
-        # Arrow keys
-        elif key in (81, 2):  # Left
-            self.camera.move_relative(-5, 0)
-        elif key in (83, 3):  # Right
-            self.camera.move_relative(5, 0)
-        elif key in (82, 0):  # Up
-            self.camera.move_relative(0, -5)
-        elif key in (84, 1):  # Down
-            self.camera.move_relative(0, 5)
+            # Arrow keys (camera position)
+            elif key in (81, 2):  # Left
+                self.camera.move_relative(-5, 0)
+            elif key in (83, 3):  # Right
+                self.camera.move_relative(5, 0)
+            elif key in (82, 0):  # Up
+                self.camera.move_relative(0, -5)
+            elif key in (84, 1):  # Down
+                self.camera.move_relative(0, 5)
 
     def _update_fps(self) -> None:
         """Update FPS counter."""

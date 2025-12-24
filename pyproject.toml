@@ -21,6 +21,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["mypy", "ruff", "pytest"]
+accuracy = ["opencv-contrib-python>=4.8.0"]  # WLS filter for improved depth
 
 [project.scripts]
 kishirisu = "main:main"

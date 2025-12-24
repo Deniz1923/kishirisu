@@ -232,10 +232,14 @@ class DepthResult:
 
 class DepthCalculator:
     """
-    High-performance stereo depth estimation.
+    High-performance stereo depth estimation with advanced filtering.
 
     Uses OpenCV's SGBM algorithm with configurable parameters for
-    quality/speed tradeoffs.
+    quality/speed tradeoffs. Supports optional post-processing:
+    - WLS (Weighted Least Squares) edge-preserving filter
+    - Left-right consistency checking
+    - Bilateral pre-filtering
+    - Temporal smoothing
 
     Example:
         >>> calc = DepthCalculator(config)
@@ -243,7 +247,14 @@ class DepthCalculator:
         >>> print(f"Center depth: {result.at_center():.0f}mm")
     """
 
-    __slots__ = ("_config", "_stereo", "_depth_factor")
+    __slots__ = (
+        "_config",
+        "_stereo_left",
+        "_stereo_right",
+        "_wls_filter",
+        "_depth_factor",
+        "_prev_depth",
+    )
 
     def __init__(self, config: StereoConfig) -> None:
         """
@@ -254,7 +265,14 @@ class DepthCalculator:
         """
         self._config = config
         self._depth_factor = config.depth_factor
-        self._stereo = self._create_stereo_matcher()
+        self._stereo_left = self._create_stereo_matcher()
+        self._stereo_right: cv2.StereoMatcher | None = None
+        self._wls_filter = None
+        self._prev_depth: npt.NDArray | None = None
+
+        # Create right matcher and WLS filter if needed
+        if config.depth_filter.use_wls_filter or config.depth_filter.left_right_check:
+            self._setup_wls_filter()
 
     def _create_stereo_matcher(self) -> cv2.StereoSGBM:
         """Create SGBM stereo matcher from config."""
@@ -274,6 +292,21 @@ class DepthCalculator:
             mode=sgbm.mode,
         )
 
+    def _setup_wls_filter(self) -> None:
+        """Create right matcher and WLS filter for disparity refinement."""
+        try:
+            # cv2.ximgproc is in opencv-contrib-python
+            self._stereo_right = cv2.ximgproc.createRightMatcher(self._stereo_left)
+            df = self._config.depth_filter
+            self._wls_filter = cv2.ximgproc.createDisparityWLSFilter(self._stereo_left)
+            self._wls_filter.setLambda(df.wls_lambda)
+            self._wls_filter.setSigmaColor(df.wls_sigma)
+            self._wls_filter.setLRCthresh(df.lr_threshold)
+        except AttributeError:
+            # opencv-contrib-python not installed, disable WLS
+            self._stereo_right = None
+            self._wls_filter = None
+
     def compute(
         self,
         left: npt.NDArray,
@@ -281,7 +314,12 @@ class DepthCalculator:
         include_disparity: bool = False,
     ) -> DepthResult:
         """
-        Compute depth map from stereo pair.
+        Compute depth map from stereo pair with optional filtering.
+
+        Applies configured filters for improved accuracy:
+        - Bilateral pre-filtering (if enabled)
+        - WLS edge-preserving filter (if enabled)
+        - Temporal smoothing (if enabled)
 
         Args:
             left: Left camera BGR image
@@ -291,12 +329,36 @@ class DepthCalculator:
         Returns:
             DepthResult with depth map and statistics
         """
+        df = self._config.depth_filter
+
+        # Optional bilateral pre-filtering
+        if df.use_bilateral:
+            left = cv2.bilateralFilter(
+                left, df.bilateral_d, df.bilateral_sigma_color, df.bilateral_sigma_space
+            )
+            right = cv2.bilateralFilter(
+                right, df.bilateral_d, df.bilateral_sigma_color, df.bilateral_sigma_space
+            )
+
         # Convert to grayscale
         left_gray = cv2.cvtColor(left, cv2.COLOR_BGR2GRAY)
         right_gray = cv2.cvtColor(right, cv2.COLOR_BGR2GRAY)
 
-        # Compute disparity (fixed-point, scaled by 16)
-        disparity_fp = self._stereo.compute(left_gray, right_gray)
+        # Compute left-to-right disparity (fixed-point, scaled by 16)
+        disparity_left_fp = self._stereo_left.compute(left_gray, right_gray)
+
+        # Apply WLS filtering if available
+        if self._wls_filter is not None and self._stereo_right is not None:
+            # Compute right-to-left disparity for WLS
+            disparity_right_fp = self._stereo_right.compute(right_gray, left_gray)
+
+            # WLS filter combines L-R disparity for edge-preserving smoothing
+            disparity_fp = self._wls_filter.filter(
+                disparity_left_fp, left, disparity_right_fp
+            )
+        else:
+            disparity_fp = disparity_left_fp
+
         disparity = disparity_fp.astype(np.float32) / 16.0
 
         # Convert to depth
@@ -306,11 +368,40 @@ class DepthCalculator:
         # Filter invalid values
         depth_map = self._filter_invalid(depth_map, disparity)
 
+        # Apply temporal smoothing
+        if df.temporal_alpha > 0 and self._prev_depth is not None:
+            depth_map = self._apply_temporal_smoothing(depth_map, df.temporal_alpha)
+
+        # Store for next frame's temporal smoothing
+        self._prev_depth = depth_map.copy()
+
         return DepthResult(
             depth_map=depth_map,
             stats=DepthStats.from_depth_map(depth_map),
             disparity_map=disparity if include_disparity else None,
         )
+
+    def _apply_temporal_smoothing(
+        self, depth_map: npt.NDArray, alpha: float
+    ) -> npt.NDArray:
+        """Apply exponential moving average for temporal smoothing."""
+        if self._prev_depth is None or self._prev_depth.shape != depth_map.shape:
+            return depth_map
+
+        # Only smooth where both frames have valid depth
+        valid_both = (depth_map > 0) & (self._prev_depth > 0)
+        result = depth_map.copy()
+
+        # EMA: new = alpha * current + (1-alpha) * previous
+        result[valid_both] = (
+            alpha * depth_map[valid_both] + (1 - alpha) * self._prev_depth[valid_both]
+        )
+
+        return result
+
+    def reset_temporal(self) -> None:
+        """Reset temporal smoothing state (call when scene changes)."""
+        self._prev_depth = None
 
     def compute_fast(
         self,
@@ -342,7 +433,7 @@ class DepthCalculator:
         left_gray = cv2.cvtColor(left_small, cv2.COLOR_BGR2GRAY)
         right_gray = cv2.cvtColor(right_small, cv2.COLOR_BGR2GRAY)
 
-        disparity_fp = self._stereo.compute(left_gray, right_gray)
+        disparity_fp = self._stereo_left.compute(left_gray, right_gray)
         disparity = (disparity_fp.astype(np.float32) / 16.0) / scale
 
         # Convert to depth

@@ -118,6 +118,67 @@ class SGBMParams(NamedTuple):
         return 32 * 3 * self.block_size**2
 
 
+class DepthFilterParams(NamedTuple):
+    """Depth filtering and refinement parameters.
+
+    These control post-processing for improved depth accuracy.
+    All filters are optional and can be combined.
+
+    Attributes:
+        use_wls_filter: Enable WLS edge-preserving filter (recommended)
+        wls_lambda: WLS regularization strength (higher = smoother)
+        wls_sigma: WLS color sensitivity (higher = more edge-preserving)
+        use_bilateral: Enable bilateral pre-filtering of input images
+        bilateral_d: Bilateral filter kernel diameter
+        bilateral_sigma_color: Bilateral color sigma
+        bilateral_sigma_space: Bilateral spatial sigma
+        left_right_check: Enable left-right disparity consistency check
+        lr_threshold: Max disparity difference for LR check (pixels)
+        temporal_alpha: Temporal smoothing factor (0=off, 0.3=moderate, 0.7=strong)
+    """
+
+    # WLS (Weighted Least Squares) filter - reduces noise while preserving edges
+    use_wls_filter: bool = True
+    wls_lambda: float = 8000.0
+    wls_sigma: float = 1.5
+
+    # Bilateral pre-filtering - smooths input while preserving edges
+    use_bilateral: bool = False
+    bilateral_d: int = 5
+    bilateral_sigma_color: float = 75.0
+    bilateral_sigma_space: float = 75.0
+
+    # Left-right consistency check - eliminates half-occluded regions
+    left_right_check: bool = True
+    lr_threshold: int = 1
+
+    # Temporal smoothing - reduces frame-to-frame jitter
+    temporal_alpha: float = 0.0  # 0 = disabled
+
+    @classmethod
+    def for_preset(cls, preset: QualityPreset) -> "DepthFilterParams":
+        """Get filter parameters optimized for a quality preset."""
+        match preset:
+            case QualityPreset.FAST:
+                return cls(
+                    use_wls_filter=False,
+                    use_bilateral=False,
+                    left_right_check=False,
+                    temporal_alpha=0.0,
+                )
+            case QualityPreset.QUALITY:
+                return cls(
+                    use_wls_filter=True,
+                    wls_lambda=16000.0,
+                    wls_sigma=2.0,
+                    use_bilateral=True,
+                    left_right_check=True,
+                    lr_threshold=1,
+                    temporal_alpha=0.2,
+                )
+            case _:  # BALANCED
+                return cls()  # Defaults are balanced
+
 def detect_camera_capabilities(camera_index: int = 0) -> dict:
     """
     Detect camera resolution and FPS capabilities.
@@ -195,6 +256,7 @@ class StereoConfig:
         min_depth_mm: Minimum reliable depth measurement
         max_depth_mm: Maximum reliable depth measurement
         sgbm: SGBM algorithm parameters
+        depth_filter: Depth filtering and refinement parameters
 
     Example:
         >>> config = StereoConfig.from_camera(baseline_mm=65.0)
@@ -209,6 +271,8 @@ class StereoConfig:
     min_depth_mm: float = 200.0
     max_depth_mm: float = 5000.0
     sgbm: SGBMParams = field(default_factory=SGBMParams)
+    depth_filter: DepthFilterParams = field(default_factory=DepthFilterParams)
+
 
     # Private computed values (calculated in __post_init__)
     _focal: float = field(init=False, repr=False, compare=False)
@@ -328,6 +392,7 @@ class StereoConfig:
             fps=caps["fps"],
             baseline_mm=baseline_mm,
             sgbm=SGBMParams.for_preset(preset),
+            depth_filter=DepthFilterParams.for_preset(preset),
         )
 
     @classmethod
@@ -342,6 +407,7 @@ class StereoConfig:
             resolution=resolution,
             baseline_mm=baseline_mm,
             sgbm=SGBMParams.for_preset(preset),
+            depth_filter=DepthFilterParams.for_preset(preset),
         )
 
     def scaled(self, factor: float) -> StereoConfig:
@@ -361,6 +427,7 @@ class StereoConfig:
             min_depth_mm=self.min_depth_mm,
             max_depth_mm=self.max_depth_mm,
             sgbm=self.sgbm,
+            depth_filter=self.depth_filter,
         )
 
     def to_dict(self) -> dict:
@@ -376,6 +443,15 @@ class StereoConfig:
             "sgbm": {
                 "num_disparities": self.sgbm.num_disparities,
                 "block_size": self.sgbm.block_size,
+            },
+            "depth_filter": {
+                "use_wls_filter": self.depth_filter.use_wls_filter,
+                "wls_lambda": self.depth_filter.wls_lambda,
+                "wls_sigma": self.depth_filter.wls_sigma,
+                "use_bilateral": self.depth_filter.use_bilateral,
+                "left_right_check": self.depth_filter.left_right_check,
+                "lr_threshold": self.depth_filter.lr_threshold,
+                "temporal_alpha": self.depth_filter.temporal_alpha,
             },
         }
 
@@ -405,6 +481,18 @@ class StereoConfig:
         pp = data.get("principal_point")
         principal_point = tuple(pp) if pp else None
         
+        # Parse depth filter params
+        df_data = data.get("depth_filter", {})
+        depth_filter = DepthFilterParams(
+            use_wls_filter=df_data.get("use_wls_filter", True),
+            wls_lambda=df_data.get("wls_lambda", 8000.0),
+            wls_sigma=df_data.get("wls_sigma", 1.5),
+            use_bilateral=df_data.get("use_bilateral", False),
+            left_right_check=df_data.get("left_right_check", True),
+            lr_threshold=df_data.get("lr_threshold", 1),
+            temporal_alpha=df_data.get("temporal_alpha", 0.0),
+        )
+        
         return cls(
             resolution=resolution,
             fps=data.get("fps", 30.0),
@@ -414,6 +502,7 @@ class StereoConfig:
             min_depth_mm=data.get("min_depth_mm", 200.0),
             max_depth_mm=data.get("max_depth_mm", 5000.0),
             sgbm=sgbm,
+            depth_filter=depth_filter,
         )
 
     @classmethod

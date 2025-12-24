@@ -4,7 +4,7 @@ Kishirisu Stereo Vision
 
 High-performance stereo depth estimation for robotics.
 
-Quick Start::
+Quick Start (Mock Camera for Testing)::
 
     from stereo_vision import StereoConfig, MockStereoCamera, DepthCalculator
 
@@ -14,10 +14,21 @@ Quick Start::
         result = DepthCalculator(config).compute(left, right)
         print(f"Center depth: {result.at_center():.0f}mm")
 
+Real Camera Usage::
+
+    from stereo_vision import StereoConfig, RealStereoCamera, DepthCalculator
+
+    config = StereoConfig.from_camera(camera_index=0)
+    with RealStereoCamera(config) as camera:
+        left, right = camera.capture()
+        result = DepthCalculator(config).compute(left, right)
+        print(f"Center depth: {result.at_center():.0f}mm")
+
 Modules:
     config: Camera configuration and SGBM parameters
     capture: Abstract capture interface
-    mock_camera: Single-webcam mock stereo
+    mock_camera: Synthetic stereo data for testing
+    real_camera: Real hardware stereo capture
     depth: SGBM depth calculation
     detection: Object detection interface
 """
@@ -29,6 +40,7 @@ from .config import (
     Resolution,
     QualityPreset,
     SGBMParams,
+    DepthFilterParams,
     StereoConfig,
     detect_camera_capabilities,
 )
@@ -40,13 +52,19 @@ from .capture import (
     BaseStereoCamera,
 )
 
-# Mock Camera
+# Mock Camera (for testing)
 from .mock_camera import (
     MockStereoCamera,
     ObjectShape,
     SceneObject,
     SceneInfo,
     NoiseMode,
+)
+
+# Real Camera (for production)
+from .real_camera import (
+    RealStereoCamera,
+    CaptureMode,
 )
 
 # Depth
@@ -74,18 +92,22 @@ __all__ = [
     "Resolution",
     "QualityPreset",
     "SGBMParams",
+    "DepthFilterParams",
     "StereoConfig",
     "detect_camera_capabilities",
     # Capture
     "CameraPosition",
     "StereoCapture",
     "BaseStereoCamera",
-    # Mock Camera
+    # Mock Camera (testing)
     "MockStereoCamera",
     "ObjectShape",
     "SceneObject",
     "SceneInfo",
     "NoiseMode",
+    # Real Camera (production)
+    "RealStereoCamera",
+    "CaptureMode",
     # Depth
     "DepthZone",
     "DepthStats",
