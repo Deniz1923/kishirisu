@@ -517,3 +517,60 @@ class StereoConfig:
             StereoConfig instance
         """
         return cls.from_dict(json.loads(json_str))
+
+    @classmethod
+    def from_calibration(cls, path: str | Path) -> Self:
+        """
+        Load configuration from a YAML calibration file.
+        
+        Calibration file format:
+            resolution: [1280, 720]
+            baseline_mm: 65.0
+            focal_length_px: 1050.0
+            principal_point: [640.0, 360.0]
+            min_depth_mm: 200.0
+            max_depth_mm: 5000.0
+        
+        Args:
+            path: Path to YAML calibration file
+            
+        Returns:
+            StereoConfig instance
+            
+        Raises:
+            FileNotFoundError: If file doesn't exist
+            ValueError: If file format is invalid
+        """
+        from pathlib import Path
+        import yaml
+        
+        path = Path(path)
+        if not path.exists():
+            raise FileNotFoundError(f"Calibration file not found: {path}")
+        
+        with open(path, 'r') as f:
+            data = yaml.safe_load(f)
+        
+        if not isinstance(data, dict):
+            raise ValueError(f"Invalid calibration file format: {path}")
+        
+        return cls.from_dict(data)
+
+    def save_calibration(self, path: str | Path) -> None:
+        """
+        Save configuration to a YAML calibration file.
+        
+        Args:
+            path: Path to save YAML file (will create parent dirs)
+        """
+        from pathlib import Path
+        import yaml
+        
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        
+        data = self.to_dict()
+        
+        with open(path, 'w') as f:
+            yaml.dump(data, f, default_flow_style=False, sort_keys=False)
+

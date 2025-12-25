@@ -85,6 +85,14 @@ from .detection import (
     DummyDetector,
 )
 
+# Tracking
+from .tracking import (
+    Position3D,
+    Velocity3D,
+    TrackState,
+    BallTracker,
+)
+
 __all__ = [
     # Version
     "__version__",
@@ -120,4 +128,9 @@ __all__ = [
     "ObjectDetector",
     "BallDetector",
     "DummyDetector",
+    # Tracking
+    "Position3D",
+    "Velocity3D",
+    "TrackState",
+    "BallTracker",
 ]
