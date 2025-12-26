@@ -39,6 +39,7 @@ __all__ = [
     "SensorNoise",
     "MockStereoCamera",
     "NoiseMode",
+    "SceneMode",
 ]
 
 
@@ -53,6 +54,13 @@ class ObjectShape(Enum):
     CIRCLE = auto()
     RECTANGLE = auto()
     ELLIPSE = auto()
+
+
+class SceneMode(Enum):
+    """Scene generation mode."""
+
+    PROCEDURAL = auto()
+    BALL_THROW = auto()
 
 
 @dataclass(frozen=True, slots=True)
@@ -750,13 +758,21 @@ class MockStereoCamera(BaseStereoCamera):
     def __init__(
         self,
         config: StereoConfig,
-        camera_index: int = 0,  # Ignored, API compatibility
+        camera_index: int = 0,
         simulated_depth_mm: float = 1000.0,
         add_noise: bool = True,
+        scene_mode: SceneMode = SceneMode.PROCEDURAL,
     ) -> None:
         super().__init__(config)
 
-        self._generator = ProceduralSceneGenerator(base_depth_mm=simulated_depth_mm)
+        if scene_mode == SceneMode.BALL_THROW:
+            self._generator = BallThrowSceneGenerator(
+                throw_speed_ms=10.0,
+                background_depth_mm=simulated_depth_mm * 5,  # Far background
+            )
+        else:
+            self._generator = ProceduralSceneGenerator(base_depth_mm=simulated_depth_mm)
+            
         self._synthesizer = StereoSynthesizer(config)
         self._noise = SensorNoise(std=2.0 if add_noise else 0.0)
         self._frame_count = 0
@@ -769,11 +785,22 @@ class MockStereoCamera(BaseStereoCamera):
         simulated_depth_mm: float = 1000.0,
         add_noise: bool = True,
         prefer_resolution: Resolution | None = None,
+        scene_mode: SceneMode = SceneMode.PROCEDURAL,
     ) -> MockStereoCamera:
         """Create with default configuration."""
         resolution = prefer_resolution or Resolution(640, 480)
         config = StereoConfig(resolution=resolution, baseline_mm=baseline_mm)
-        return cls(config=config, simulated_depth_mm=simulated_depth_mm, add_noise=add_noise)
+        return cls(
+            config=config, 
+            simulated_depth_mm=simulated_depth_mm, 
+            add_noise=add_noise,
+            scene_mode=scene_mode
+        )
+
+    def trigger_throw(self) -> None:
+        """Trigger a new ball throw (if in ball throw mode)."""
+        if isinstance(self._generator, BallThrowSceneGenerator):
+            self._generator.new_throw()
 
     # ---- Properties ----
 

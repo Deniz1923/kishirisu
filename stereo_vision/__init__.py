@@ -59,6 +59,7 @@ from .mock_camera import (
     SceneObject,
     SceneInfo,
     NoiseMode,
+    SceneMode,
     BallThrowSceneGenerator,
 )
 
@@ -114,6 +115,7 @@ __all__ = [
     "SceneObject",
     "SceneInfo",
     "NoiseMode",
+    "SceneMode",
     "BallThrowSceneGenerator",
     # Real Camera (production)
     "RealStereoCamera",

@@ -47,7 +47,9 @@ from stereo_vision import (
     Detection,
     Resolution,
     QualityPreset,
+    QualityPreset,
     StereoCapture,
+    SceneMode,
 )
 
 if TYPE_CHECKING:
@@ -73,6 +75,7 @@ class DemoConfig:
     save_dir: Path = field(default_factory=lambda: Path("captures"))
     preset: QualityPreset = QualityPreset.BALANCED
     use_mock_camera: bool = False  # Default to real camera
+    ball_throw_mode: bool = False
 
     @classmethod
     def from_args(cls, args: argparse.Namespace) -> DemoConfig:
@@ -88,6 +91,7 @@ class DemoConfig:
             enable_detector=not args.no_detector,
             save_dir=Path(args.save_dir),
             use_mock_camera=args.mock,
+            ball_throw_mode=args.ball_throw,
         )
 
 
@@ -125,6 +129,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--mock", "-m", action="store_true",
         help="Use mock camera (synthetic data) instead of real hardware"
+    )
+    parser.add_argument(
+        "--ball-throw", action="store_true",
+        help="Enable ball throw simulation (implies --mock)"
     )
 
     return parser.parse_args()
@@ -239,6 +247,8 @@ class HelpOverlay:
         ("V", "Toggle verbose stats"),
         ("H", "Toggle this help"),
         ("S", "Save frame"),
+        ("S", "Save frame"),
+        ("T", "Trigger throw"),
         ("Q/ESC", "Quit"),
     ]
 
@@ -310,12 +320,26 @@ class StereoVisionDemo:
 
         # Create stereo config
         print("\n[1/4] Configuring stereo system...")
-        stereo_config = StereoConfig.from_camera(
-            camera_index=self.config.camera_index,
-            baseline_mm=self.config.baseline_mm,
-            prefer_resolution=self.config.resolution,
-            preset=self.config.preset,
-        )
+        if self.config.use_mock_camera:
+            # Don't need real camera for mock mode
+            stereo_config = StereoConfig.for_preset(
+                preset=self.config.preset,
+                resolution=self.config.resolution,
+                baseline_mm=self.config.baseline_mm,
+            )
+        else:
+            # Detect camera capabilities
+            if hasattr(self.config, 'ball_throw_mode') and self.config.ball_throw_mode:
+                # Force mock mode if ball throw is requested
+                print("        [INFO] Ball throw mode requested -> Forcing MOCK camera")
+                self.config.use_mock_camera = True
+                
+            stereo_config = StereoConfig.from_camera(
+                camera_index=self.config.camera_index,
+                baseline_mm=self.config.baseline_mm,
+                prefer_resolution=self.config.resolution,
+                preset=self.config.preset,
+            )
 
         # Initialize camera
         print("[2/4] Initializing camera...")
@@ -326,6 +350,7 @@ class StereoVisionDemo:
                 camera_index=self.config.camera_index,
                 simulated_depth_mm=self.config.simulated_depth_mm,
                 add_noise=True,
+                scene_mode=SceneMode.BALL_THROW if self.config.ball_throw_mode else SceneMode.PROCEDURAL,
             )
         else:
             print("        Using REAL camera")
@@ -343,6 +368,7 @@ class StereoVisionDemo:
                     camera_index=self.config.camera_index,
                     simulated_depth_mm=self.config.simulated_depth_mm,
                     add_noise=True,
+                    scene_mode=SceneMode.BALL_THROW if self.config.ball_throw_mode else SceneMode.PROCEDURAL,
                 )
 
         # Initialize depth calculator
@@ -479,26 +505,45 @@ class StereoVisionDemo:
         # Periodic terminal output with detection depths
         if time.time() - self.last_print_time >= 0.5:
             self.last_print_time = time.time()
-            print("\n" + "=" * 80)
-            print(f"[CENTER DEPTH] {center_depth:.0f}mm = {center_depth/10:.1f}cm = {center_depth/1000:.2f}m" if center_depth > 0 else "[CENTER DEPTH] No valid depth")
-            print(f"[PERFORMANCE] FPS: {self.fps:.1f} | Processing: {self.process_ms:.1f}ms | Mode: {'FAST' if self.fast_mode else 'NORMAL'}")
             
-            # Verbose depth statistics
+            # Clear screen and print clean output
+            print("\033[2J\033[H", end="")  # Clear screen, cursor to top
+            print("=" * 60)
+            print("  KISHIRISU - Ball Catcher Vision")
+            print("=" * 60)
+            
+            # Center depth - the main metric
+            if center_depth > 0:
+                meters = center_depth / 1000
+                print(f"  CENTER: {center_depth:.0f}mm = {meters:.2f}m")
+            else:
+                print("  CENTER: No valid depth")
+            
+            # Performance
+            mode_str = "FAST" if self.fast_mode else "NORMAL"
+            print(f"  FPS: {self.fps:.1f}  |  Process: {self.process_ms:.1f}ms  |  {mode_str}")
+            
+            # Depth stats (compact)
             if self.verbose_mode:
                 stats = result.stats
-                print(f"[DEPTH STATS]")
-                print(stats.format_verbose())
+                print("-" * 60)
+                print(f"  Range: {stats.min_mm:.0f}-{stats.max_mm:.0f}mm  |  Valid: {stats.valid_ratio*100:.0f}%")
             
-            # Detection output
+            # Detections - the key info for ball catching
+            print("=" * 60)
             if detections_with_depth:
-                print(f"[DETECTIONS] Found {len(detections_with_depth)} object(s):")
-                for i, (det, depth_mm, pos_3d) in enumerate(detections_with_depth[:5], 1):
+                print(f"  DETECTED: {len(detections_with_depth)} object(s)")
+                for i, (det, depth_mm, pos_3d) in enumerate(detections_with_depth[:3], 1):
                     if depth_mm > 0:
                         x3d, y3d, z3d = pos_3d
-                        print(f"  {i}. {det.label.upper()} @ ({det.x},{det.y}) -> {depth_mm:.0f}mm | 3D=({x3d:.0f},{y3d:.0f},{z3d:.0f})")
+                        print(f"    {i}. {det.label.upper()} -> {depth_mm:.0f}mm  ({x3d:.0f}, {y3d:.0f}, {z3d:.0f})")
                     else:
-                        print(f"  {i}. {det.label.upper()} @ ({det.x},{det.y}) -> NO DEPTH")
-            print("=" * 80)
+                        print(f"    {i}. {det.label.upper()} -> NO DEPTH")
+            else:
+                print("  No objects detected")
+            
+            print("=" * 60)
+            print("  [H]elp  [F]ast  [V]erbose  [S]ave  [Q]uit")
 
     def _compose_display(
         self,
@@ -631,6 +676,10 @@ class StereoVisionDemo:
                 self.camera.move_relative(0, -5)
             elif key in (84, 1):  # Down
                 self.camera.move_relative(0, 5)
+
+            elif key == ord("t"):
+                self.camera.trigger_throw()
+                print(">>> NEW THROW! <<<")
 
     def _update_fps(self) -> None:
         """Update FPS counter."""

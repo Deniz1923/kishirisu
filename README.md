@@ -249,6 +249,62 @@ For development without hardware, `MockStereoCamera` generates synthetic stereo:
 uv run python main.py --mock
 ```
 
+### Simulation Modes
+
+The mock camera supports two modes for generating synthetic data:
+
+#### 1. Procedural Mode (Default)
+Generates a random scene with:
+- Floor plane with depth gradient
+- 8+ objects of various shapes (circles, rectangles, ellipses)
+- Moving target center
+- Random motion and colors
+
+#### 2. Ball Throw Simulation (`--ball-throw`)
+Simulates a ball continually being thrown at the camera. Ideal for testing tracking algorithms.
+- **Physics-based**: Gravity, parabolic trajectory, perspective scaling.
+- **Controls**: Press **'T'** to trigger a new random throw.
+- **Usage**:
+  ```bash
+  uv run python main.py --mock --ball-throw
+  ```
+
+---
+
+## How Stereo Vision Works (Beginner's Guide) 🎓
+
+If you are new to depth estimation, here is the concept in plain English.
+
+### 1. The "Two Eyes" Concept
+Stereo vision mimics human eyes. When you look at an object:
+- Your **Left Eye** sees it at position $X_L$.
+- Your **Right Eye** sees it at position $X_R$.
+- Because your eyes are apart, there is a shift called **Disparity**.
+
+Try this: Hold your finger in front of your face. Close one eye, then the other. Your finger seems to jump left/right. That "jump" is the disparity.
+
+### 2. The Golden Rule
+> **Closer objects have BIGGER disparity. Farther objects have SMALLER disparity.**
+
+- **Close finger**: Jumps a lot (large shift).
+- **Far mountain**: Doesn't jump at all (zero shift).
+
+### 3. The Formula
+To turn that pixel shift (disparity) into real distance (depth), we use three numbers:
+
+$$ Depth = \frac{\text{Focal Length} \times \text{Baseline}}{\text{Disparity}} $$
+
+- **Baseline ($B$)**: Distance between the two cameras (mm). *Fixed content.*
+- **Focal Length ($f$)**: "Zoom" level of the lens (pixels). *Fixed constant.*
+- **Disparity ($d$)**: Difference in pixel position ($x_{left} - x_{right}$). *Calculated per pixel.*
+
+### Summary for this project
+1. The camera captures two images.
+2. The software finds matching pixels between Left and Right images.
+3. It calculates the **Disparity** (pixels) for every point.
+4. It divides the constant $(f \times B)$ by disparity to get **Depth** (mm).
+
+
 ## Requirements
 
 - Python 3.11+
