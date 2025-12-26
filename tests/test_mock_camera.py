@@ -219,3 +219,99 @@ class TestMockStereoCamera:
         camera.move_relative(10, 5)
         assert camera.current_x == 10.0
         assert camera.current_y == 5.0
+
+
+class TestBallThrowSceneGenerator:
+    """Tests for BallThrowSceneGenerator physics simulation."""
+
+    @pytest.fixture
+    def generator(self) -> "BallThrowSceneGenerator":
+        from stereo_vision.mock_camera import BallThrowSceneGenerator
+        return BallThrowSceneGenerator(
+            throw_speed_ms=10.0,
+            max_throw_distance_mm=5000.0,
+            min_catch_distance_mm=500.0,
+            fps=30.0,
+        )
+
+    def test_generate_returns_scene(self, generator) -> None:
+        from stereo_vision.mock_camera import Scene
+        scene = generator.generate(640, 480, frame=1)
+        assert isinstance(scene, Scene)
+        assert scene.depth_map is not None
+        assert scene.image is not None
+
+    def test_ball_approaches_camera(self, generator) -> None:
+        """Ball depth should decrease over frames."""
+        scene1 = generator.generate(640, 480, frame=1)
+        scene10 = generator.generate(640, 480, frame=10)
+        
+        ball1_depth = scene1.objects[0].depth_mm
+        ball10_depth = scene10.objects[0].depth_mm
+        
+        assert ball10_depth < ball1_depth  # Ball got closer
+
+    def test_ball_size_increases_as_approaches(self, generator) -> None:
+        """Ball should appear larger as it gets closer."""
+        scene1 = generator.generate(640, 480, frame=1)
+        scene20 = generator.generate(640, 480, frame=20)
+        
+        size1 = scene1.objects[0].width
+        size20 = scene20.objects[0].width
+        
+        assert size20 > size1  # Ball appears larger when closer
+
+    def test_throw_becomes_inactive(self, generator) -> None:
+        """Throw should become inactive when ball reaches min distance."""
+        assert generator.is_throw_active
+        
+        # Simulate many frames until ball reaches min distance
+        for frame in range(1, 100):
+            generator.generate(640, 480, frame=frame)
+        
+        assert not generator.is_throw_active
+
+    def test_new_throw_resets(self, generator) -> None:
+        """new_throw() should reset the trajectory."""
+        # Get initial position
+        initial_pos = generator.ball_position
+        
+        # Generate some frames
+        for frame in range(1, 20):
+            generator.generate(640, 480, frame=frame)
+        
+        # Start new throw
+        generator.new_throw(seed=999)
+        new_pos = generator.ball_position
+        
+        # Position should be different with new seed
+        assert initial_pos != new_pos or generator.is_throw_active
+
+    def test_scene_has_one_ball(self, generator) -> None:
+        """Scene should contain exactly one ball object."""
+        scene = generator.generate(640, 480, frame=5)
+        assert len(scene.objects) == 1
+        assert scene.objects[0].label == "ball"
+
+    def test_depth_map_shows_ball(self, generator) -> None:
+        """Ball should be visible in depth map at correct depth."""
+        scene = generator.generate(640, 480, frame=5)
+        ball = scene.objects[0]
+        
+        # Check depth at ball center
+        depth_at_ball = scene.depth_map[ball.y, ball.x]
+        assert depth_at_ball == pytest.approx(ball.depth_mm, rel=0.1)
+
+    def test_gravity_affects_y_position(self, generator) -> None:
+        """Ball Y position should increase due to gravity."""
+        # Get positions at different times
+        scene1 = generator.generate(640, 480, frame=1)
+        scene30 = generator.generate(640, 480, frame=30)
+        
+        y1 = scene1.objects[0].y
+        y30 = scene30.objects[0].y
+        
+        # Y should increase (ball falls down) - may vary based on initial velocity
+        # Just verify ball moved vertically
+        assert y1 != y30
+

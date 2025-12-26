@@ -27,6 +27,21 @@ if TYPE_CHECKING:
     import numpy.typing as npt
 
 
+__all__ = [
+    "ObjectShape",
+    "SceneObject",
+    "SceneInfo",
+    "Scene",
+    "SceneGenerator",
+    "ProceduralSceneGenerator",
+    "BallThrowSceneGenerator",
+    "StereoSynthesizer",
+    "SensorNoise",
+    "MockStereoCamera",
+    "NoiseMode",
+]
+
+
 # ============================================================================
 # Data Classes
 # ============================================================================
@@ -399,6 +414,210 @@ class ProceduralSceneGenerator(SceneGenerator):
     def set_base_depth(self, depth_mm: float) -> None:
         """Update base depth for center object."""
         self.base_depth = depth_mm
+
+
+class BallThrowSceneGenerator(SceneGenerator):
+    """
+    Generates scenes with a ball being thrown toward the camera.
+    
+    Simulates realistic ballistic trajectory for ball catcher robot testing:
+    - Parabolic arc with gravity
+    - Ball approaching camera (depth decreasing)
+    - Ball size scaling with distance
+    - Random throw parameters (speed, angle, entry point)
+    - Background with depth variation
+    
+    Example:
+        >>> generator = BallThrowSceneGenerator(throw_speed_ms=10.0)
+        >>> scene = generator.generate(640, 480, frame=0)
+        >>> generator.new_throw()  # Start a new throw sequence
+    """
+    
+    # Ball appearance
+    BALL_COLOR_HSV = (10, 220, 255)  # Orange sports ball
+    BALL_REAL_DIAMETER_MM = 220.0   # Volleyball size
+    
+    # Physics constants
+    GRAVITY_MMS2 = 9810.0  # mm/s^2
+    
+    def __init__(
+        self,
+        throw_speed_ms: float = 8.0,        # meters/second toward camera
+        max_throw_distance_mm: float = 8000.0,
+        min_catch_distance_mm: float = 500.0,
+        fps: float = 30.0,
+        background_depth_mm: float = 10000.0,
+        seed: int = 42,
+    ) -> None:
+        """
+        Initialize ball throw generator.
+        
+        Args:
+            throw_speed_ms: Forward velocity in meters/second
+            max_throw_distance_mm: Starting distance of throw
+            min_catch_distance_mm: Closest the ball can get
+            fps: Frames per second (for physics timing)
+            background_depth_mm: Depth of background plane
+            seed: Random seed for reproducibility
+        """
+        self.throw_speed_mms = throw_speed_ms * 1000.0  # Convert to mm/s
+        self.max_distance = max_throw_distance_mm
+        self.min_distance = min_catch_distance_mm
+        self.fps = fps
+        self.dt = 1.0 / fps
+        self.background_depth = background_depth_mm
+        self._rng = np.random.default_rng(seed)
+        
+        # Current throw state
+        self._throw_start_frame = 0
+        self._initial_x = 0.0  # Normalized 0-1
+        self._initial_y = 0.0  # Normalized 0-1
+        self._vx = 0.0         # Pixels/frame horizontal
+        self._vy = 0.0         # Pixels/frame vertical (before gravity)
+        self._throw_active = True
+        
+        # Initialize first throw
+        self._init_throw_params()
+    
+    def _init_throw_params(self) -> None:
+        """Initialize random throw parameters."""
+        # Random entry point (bias toward center)
+        self._initial_x = 0.3 + 0.4 * self._rng.random()
+        self._initial_y = 0.2 + 0.3 * self._rng.random()
+        
+        # Random horizontal/vertical aim (toward center)
+        target_x = 0.4 + 0.2 * self._rng.random()
+        target_y = 0.4 + 0.2 * self._rng.random()
+        
+        # Velocity in normalized coords per second
+        throw_duration = self.max_distance / self.throw_speed_mms
+        self._vx = (target_x - self._initial_x) / throw_duration
+        self._vy = (target_y - self._initial_y) / throw_duration
+        
+        self._throw_active = True
+    
+    def new_throw(self, seed: int | None = None) -> None:
+        """Start a new throw sequence with optional new seed."""
+        if seed is not None:
+            self._rng = np.random.default_rng(seed)
+        self._throw_start_frame = 0
+        self._init_throw_params()
+    
+    def generate(self, width: int, height: int, frame: int) -> Scene:
+        """Generate scene with thrown ball at current trajectory position."""
+        # Time since throw start
+        if self._throw_start_frame == 0:
+            self._throw_start_frame = frame
+        
+        t = (frame - self._throw_start_frame) * self.dt
+        
+        # Calculate ball position using physics
+        ball_z = self.max_distance - self.throw_speed_mms * t
+        
+        # Check if throw is complete
+        if ball_z <= self.min_distance:
+            ball_z = self.min_distance
+            self._throw_active = False
+        
+        # X/Y position with gravity on Y
+        norm_x = self._initial_x + self._vx * t
+        norm_y = self._initial_y + self._vy * t + 0.5 * (self.GRAVITY_MMS2 / 1000000) * t**2
+        
+        ball_x = int(norm_x * width)
+        ball_y = int(norm_y * height)
+        
+        # Ball size based on distance (perspective projection)
+        # size_px = (real_size_mm * focal_length_px) / depth_mm
+        focal_estimate = width * 0.82
+        ball_diameter = int(self.BALL_REAL_DIAMETER_MM * focal_estimate / ball_z)
+        ball_diameter = max(10, min(ball_diameter, min(width, height) // 2))
+        
+        # Create ball object
+        ball = SceneObject(
+            x=ball_x,
+            y=ball_y,
+            width=ball_diameter,
+            height=ball_diameter,
+            depth_mm=ball_z,
+            shape=ObjectShape.CIRCLE,
+            label="ball",
+            color_hsv=self.BALL_COLOR_HSV,
+            velocity=(self._vx * width * self.fps, self._vy * height * self.fps),
+        )
+        
+        # Generate scene
+        depth_map = self._create_depth_map(width, height, ball)
+        image = self._create_image(width, height, depth_map, ball)
+        info = self._create_info(frame, ball, t)
+        
+        return Scene(depth_map=depth_map, image=image, objects=[ball], info=info)
+    
+    def _create_depth_map(
+        self, w: int, h: int, ball: SceneObject
+    ) -> npt.NDArray:
+        """Create depth map with background and ball."""
+        # Background gradient (floor-like)
+        y_ratio = np.linspace(0.5, 1.0, h).reshape(-1, 1)
+        depth_map = np.full((h, w), self.background_depth, dtype=np.float32)
+        depth_map = depth_map * y_ratio
+        
+        # Draw ball
+        yy, xx = np.ogrid[:h, :w]
+        r = ball.radius
+        mask = (xx - ball.x) ** 2 + (yy - ball.y) ** 2 <= r ** 2
+        depth_map[mask] = ball.depth_mm
+        
+        return depth_map
+    
+    def _create_image(
+        self, w: int, h: int, depth_map: npt.NDArray, ball: SceneObject
+    ) -> npt.NDArray:
+        """Create colorful image with ball."""
+        # Background based on depth
+        normalized = np.clip(depth_map / self.background_depth, 0, 1)
+        
+        hsv = np.zeros((h, w, 3), dtype=np.uint8)
+        hsv[:, :, 0] = 100  # Blue-ish background
+        hsv[:, :, 1] = 80
+        hsv[:, :, 2] = (100 + normalized * 80).astype(np.uint8)
+        
+        # Draw ball with its color
+        yy, xx = np.ogrid[:h, :w]
+        r = ball.radius
+        ball_mask = (xx - ball.x) ** 2 + (yy - ball.y) ** 2 <= r ** 2
+        
+        # Add shading to ball (simple 3D effect)
+        if np.any(ball_mask):
+            dist_from_center = np.sqrt((xx - ball.x) ** 2 + (yy - ball.y) ** 2)
+            shading = 1.0 - (dist_from_center / r) * 0.3
+            shading = np.clip(shading, 0.5, 1.0)
+            
+            hsv[:, :, 0][ball_mask] = ball.color_hsv[0]
+            hsv[:, :, 1][ball_mask] = ball.color_hsv[1]
+            hsv[:, :, 2][ball_mask] = (ball.color_hsv[2] * shading[ball_mask]).astype(np.uint8)
+        
+        return cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+    
+    def _create_info(self, frame: int, ball: SceneObject, t: float) -> SceneInfo:
+        """Create scene metadata."""
+        return SceneInfo(
+            frame_number=frame,
+            object_count=1,
+            depth_range=(ball.depth_mm, self.background_depth),
+            has_occlusion=False,
+            complexity=3,
+            description=f"Ball at {ball.depth_mm:.0f}mm, t={t:.2f}s, active={self._throw_active}",
+        )
+    
+    @property
+    def is_throw_active(self) -> bool:
+        """Check if current throw is still in progress."""
+        return self._throw_active
+    
+    @property
+    def ball_position(self) -> tuple[float, float]:
+        """Get current normalized ball position (x, y)."""
+        return (self._initial_x, self._initial_y)
 
 
 # ============================================================================

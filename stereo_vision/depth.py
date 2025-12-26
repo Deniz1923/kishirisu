@@ -30,6 +30,14 @@ if TYPE_CHECKING:
     import numpy.typing as npt
 
 
+__all__ = [
+    "DepthZone",
+    "DepthStats",
+    "DepthResult",
+    "DepthCalculator",
+]
+
+
 @dataclass(frozen=True, slots=True)
 class DepthZone:
     """Depth zone classification for verbose analysis."""

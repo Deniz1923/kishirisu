@@ -22,6 +22,13 @@ if TYPE_CHECKING:
     from .config import StereoConfig
 
 
+__all__ = [
+    "CameraPosition",
+    "StereoCapture",
+    "BaseStereoCamera",
+]
+
+
 @dataclass(frozen=True, slots=True)
 class CameraPosition:
     """Immutable camera mount position in millimeters."""

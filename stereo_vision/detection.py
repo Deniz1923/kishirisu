@@ -23,6 +23,16 @@ if TYPE_CHECKING:
     import numpy.typing as npt
 
 
+__all__ = [
+    "BoundingBox",
+    "Detection",
+    "Detector",
+    "ObjectDetector",
+    "BallDetector",
+    "DummyDetector",
+]
+
+
 @dataclass(frozen=True, slots=True)
 class BoundingBox:
     """

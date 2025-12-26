@@ -596,8 +596,20 @@ class StereoVisionDemo:
         elif key == ord("s"):
             timestamp = time.strftime("%Y%m%d_%H%M%S")
             path = self.config.save_dir / f"capture_{timestamp}.png"
-            # Would save display here
-            print(f"Saved: {path}")
+            if self._depth_map is not None:
+                # Compose the display for saving
+                left, right = self.camera.capture()
+                depth_vis = self.depth_calc.visualize(
+                    self._depth_map, self.COLORMAPS[self.colormap_idx]
+                )
+                h, w = left.shape[:2]
+                top = np.hstack([left, right])
+                bottom = np.hstack([depth_vis, np.zeros_like(depth_vis)])
+                save_img = np.vstack([top, bottom])
+                cv2.imwrite(str(path), save_img)
+                print(f"Saved: {path}")
+            else:
+                print("No frame to save")
 
         # Mock camera only controls
         elif isinstance(self.camera, MockStereoCamera):

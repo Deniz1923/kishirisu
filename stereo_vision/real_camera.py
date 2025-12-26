@@ -30,6 +30,12 @@ if TYPE_CHECKING:
     from .config import StereoConfig
 
 
+__all__ = [
+    "CaptureMode",
+    "RealStereoCamera",
+]
+
+
 class CaptureMode(Enum):
     """Stereo capture mode for real cameras."""
 
